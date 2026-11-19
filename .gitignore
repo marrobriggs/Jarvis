@@ -1,0 +1,26 @@
+# Run outputs: drafts, code runs and client data stay on your laptop
+runs/
+
+# Your personal gig decisions log
+graded_gigs.csv
+
+# Secrets: API keys must never be uploaded
+.env
+*.key
+
+# Client data files (only the sample data is shared)
+*.xlsx
+*.xls
+*.parquet
+*.csv
+!sample_sales.csv
+
+# Python clutter
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor and OS files
+.vscode/
+Thumbs.db

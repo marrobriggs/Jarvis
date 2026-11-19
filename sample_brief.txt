@@ -1,0 +1,10 @@
+Client: small online retailer
+Budget: $300, due in 5 days
+
+We have a CSV of 2 years of sales (sample_sales.csv) (columns: date, region, product_category, units, revenue).
+We want to know:
+1. How has monthly revenue trended, and is there seasonality?
+2. Which regions and product categories drive most of the growth?
+3. A simple interactive dashboard we can open to explore revenue by region and category.
+
+Please include charts and a short plain-English summary we can share with our team.
