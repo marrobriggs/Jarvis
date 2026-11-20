@@ -213,38 +213,49 @@ def section(title: str, intro: str = "") -> None:
         st.markdown(f'<p class="jt-insight">{intro}</p>', unsafe_allow_html=True)
 
 
-def _sort_horizontal_bars(fig) -> None:
-    """Rank horizontal bars by value (largest at top), even when they're colored by category.
+def _tidy_bars(fig, sort) -> None:
+    """Rank horizontal bars and drop gridlines that cut between bars.
 
-    Coloring by category makes Plotly group bars by color, which breaks the ranking.
-    Vertical bars are left alone, since they're often in time order.
+    sort="desc": largest at the top (top sellers, biggest drivers). The default.
+    sort="asc":  smallest at the top (the least, the weakest, the bottom 10).
+    sort=None:   keep the order given (e.g. funnel stages).
+    Vertical bars are never re-sorted, since they're often in time order.
     """
     try:
         bars = [t for t in fig.data if getattr(t, "type", "") == "bar"]
-        if bars and all(getattr(t, "orientation", None) == "h" for t in bars):
-            fig.update_yaxes(categoryorder="total ascending")
+        if not bars:
+            return
+        horizontal = all(getattr(t, "orientation", None) == "h" for t in bars)
+        if horizontal:
+            fig.update_yaxes(showgrid=False)          # the category axis needs no gridlines
+            if sort in ("desc", True):
+                fig.update_yaxes(categoryorder="total ascending")    # Plotly draws bottom-up
+            elif sort == "asc":
+                fig.update_yaxes(categoryorder="total descending")
+        else:
+            fig.update_xaxes(showgrid=False)
     except Exception:
         pass
 
 
-def chart(fig, insight: str = "", table=None, sort: bool = True) -> None:
+def chart(fig, insight: str = "", table=None, sort="desc") -> None:
     """Show a Plotly chart in the Jarvis style, with a one-line takeaway and a data table.
 
-    Horizontal bar charts are ranked by value automatically; pass sort=False to keep
+    Horizontal bars are ranked by value: sort="desc" puts the largest on top (default),
+    sort="asc" puts the smallest on top (for "least"/"weakest" charts), sort=None keeps
     your own order (e.g. funnel stages).
     """
     import plotly.io as pio
     import streamlit as st
     import inspect
     fig.update_layout(template=pio.templates["jarvis"])
-    if sort:
-        _sort_horizontal_bars(fig)
     try:  # enforce the look even if the chart code tried to override it
         fig.update_layout(paper_bgcolor=SURFACE, plot_bgcolor=SURFACE)
         fig.update_xaxes(gridcolor=GRID, zeroline=False)
         fig.update_yaxes(gridcolor=GRID, zeroline=False)
     except Exception:
         pass
+    _tidy_bars(fig, sort)
     # theme=None keeps Streamlit from repainting the chart with its own colors
     if "width" in inspect.signature(st.plotly_chart).parameters:
         st.plotly_chart(fig, theme=None, width="stretch")       # newer Streamlit

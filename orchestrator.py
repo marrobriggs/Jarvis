@@ -122,10 +122,10 @@ def write_launcher(workdir: str) -> str:
     return path
 
 
-def optional_next_steps(work: str) -> list:
-    """Pull the 'Optional next steps' lines out of the final deliverable, if any."""
+def optional_next_steps(work: str, section: str = "optional next steps") -> list:
+    """Pull the lines of a write-up section (default 'Optional next steps') out of the deliverable."""
     import re
-    match = re.search(r"^\s*#{1,4}\s*(?:\d+[.)]\s*)?optional next steps\s*$(.*?)(?=^\s*#{1,4}\s|\Z)",
+    match = re.search(r"^\s*#{1,4}\s*(?:\d+[.)]\s*)?" + re.escape(section) + r"\s*$(.*?)(?=^\s*#{1,4}\s|\Z)",
                       work, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
     if not match:
         return []
@@ -289,6 +289,11 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
                 print("\nTo open the report app, double-click OPEN_REPORT.bat in the work folder, or run:")
                 print(f'  cd "{os.path.abspath(workdir)}"')
                 print("  python -m streamlit run app.py")
+            questions = optional_next_steps(work, "questions for the client")
+            if questions:
+                print("\nQuestions to include in your message to the client:")
+                for line in questions:
+                    print(f"  - {line}")
             extras = optional_next_steps(work)
             if extras:
                 print("\nOptional extras to offer the client (not built):")

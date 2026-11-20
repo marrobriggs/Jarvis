@@ -96,7 +96,8 @@ FOR REPORT, FILE 2, "# file: app.py": a short, sleek Streamlit app.
   Comparing 2 measures (units vs revenue, big orders vs other orders):
     color_discrete_map=jt.compare([...]); never reuse a group's color for a measure.
   Magnitude (heatmaps): color_continuous_scale=jt.SEQUENTIAL.
-- Horizontal bars are ranked by value automatically; keep ranking in mind for vertical bars.
+- Horizontal bars are ranked by value automatically, largest on top. For "least",
+  "weakest" or "bottom N" charts pass jt.chart(fig, ..., sort="asc") so the smallest is on top.
 - KPI labels: 25 characters or fewer, e.g. "Orders" not "Orders with items recorded".
 - Chart rules: every chart gets a title stating its takeaway, axis titles with units
   (e.g. "Revenue ($)", "Orders per day"), sorted bars, no pie charts for close values,
@@ -114,13 +115,20 @@ All code: never call fig.show(), keep each file to roughly 120 lines.
   Jarvis installs approved packages and asks Marro about any others. Use exact
   PyPI names, and only well-known packages. If one gets declined, work without it.
 
+VOICE: Marro is a solo freelancer. Client-facing text says "I", never "we". The report,
+deck or files contain answers, not requests: never ask the client for anything inside a
+deliverable. Anything you'd want to ask them goes under "Questions for the client" in
+your write-up instead, and Jarvis passes it to Marro for his delivery message.
+
 BE CONCISE. Your answer has a length limit, and if it is cut off the code won't run.
 Your deliverable, in Markdown, in this order:
 1. Approach: 3-5 sentences, starting with the Deliverable line
 2. Code: the ```python blocks
 3. Findings: plain-English answers to each client question
 4. Caveats: 2-4 bullets on data limits and assumptions
-5. Optional next steps: ONLY if the client mentioned an optional extra, 1-2 lines
+5. Questions for the client: ONLY if there's something genuinely worth asking, 1-3
+   short questions (e.g. "Which dishes did you expect to be hits?"). Otherwise leave it out.
+6. Optional next steps: ONLY if the client mentioned an optional extra, 1-2 lines
    offering it, e.g. "You mentioned a dashboard would be a plus. I can build an
    interactive version of this analysis as a follow-up." Otherwise leave it out.
 
@@ -142,6 +150,9 @@ Plain-English answers to each client question, citing the exact printed numbers.
 
 ### Caveats
 2-4 bullets on data limits and assumptions.
+
+### Questions for the client
+ONLY if something is genuinely worth asking: 1-3 short questions. Otherwise omit this section.
 
 ### Optional next steps
 ONLY if the client mentioned an optional extra ("nice to have", "a plus", "bonus")
@@ -178,6 +189,8 @@ Label EVERY feedback point as BLOCKING or POLISH:
   caveat that changes how a number should be read.
 - POLISH (it would be better, but nothing is wrong): wording, styling, extra charts,
   extra context, footnotes, nicer formatting. Polish points go to a later polish round.
+- Client-facing text in the "we" voice, or requests to the client inside a report,
+  deck or file, are POLISH points (questions belong under "Questions for the client").
 - Extras the client called optional ("nice to have", "a plus", "bonus") are NOT
   required. Never mark a missing optional extra as BLOCKING; it should be offered
   under "Optional next steps" (if it isn't, that's a POLISH point).
