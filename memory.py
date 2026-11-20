@@ -51,7 +51,8 @@ EMBED_MODEL = "nomic-embed-text"
 class OllamaEmbedder:
     """Meaning-based embeddings from nomic-embed-text running in Ollama (free, local)."""
     name = f"ollama:{EMBED_MODEL}"
-    min_score = 0.55          # similarity below this isn't really "related"
+    min_score = 0.58          # calibrated on real data: related 0.60-0.64, unrelated topic 0.52-0.535
+    same_lesson = 0.85        # two lessons this similar are the same lesson, reworded
 
     def embed(self, texts, query=False):
         prefix = "search_query: " if query else "search_document: "   # what nomic expects
@@ -68,6 +69,7 @@ class KeywordEmbedder:
     """Fallback: hashes words into a fixed-size vector. Matches shared words, not meaning."""
     name = "keyword-hash-512"
     min_score = 0.33          # calibrated: related briefs scored 0.44-0.56, unrelated mostly < 0.3
+    same_lesson = 0.9
     dims = 512
     _stop = set("a an and are as at be by for from has have in is it its of on or that the this "
                 "to was we were will with you your our their they i want wants need needs owner "
@@ -112,6 +114,7 @@ class Memory:
         self.vectors_path = os.path.join(folder, "vectors.npy")
         self.embedder = embedder or pick_embedder()
         self.records, self.vectors = [], None
+        self._plain = {}          # text -> vector, so duplicate checks don't re-embed everything
         if os.path.exists(self.records_path):
             with open(self.records_path, encoding="utf-8") as f:
                 saved = json.load(f)
@@ -156,7 +159,11 @@ class Memory:
         if self.vectors is not None and len(self.records):
             same_kind = [i for i, r in enumerate(self.records) if r["kind"] == kind]
             if same_kind:
-                plain = _normalize(self.embedder.embed([self.records[i]["text"] for i in same_kind]))
+                missing = [self.records[i]["text"] for i in same_kind if self.records[i]["text"] not in self._plain]
+                if missing:
+                    for t, v in zip(missing, _normalize(self.embedder.embed(missing))):
+                        self._plain[t] = v
+                plain = np.vstack([self._plain[self.records[i]["text"]] for i in same_kind])
                 sims = plain @ text_vector
                 best = int(np.argmax(sims))
                 if float(sims[best]) >= dedupe:
@@ -165,6 +172,7 @@ class Memory:
                     match["meta"]["seen"] = match["meta"].get("seen", 1) + 1
                     self._save()
                     return False
+        self._plain[text] = text_vector
         record = {"kind": kind, "text": text, "meta": meta or {},
                   "created": datetime.now().isoformat(timespec="seconds")}
         if embed_text != text:
@@ -173,6 +181,94 @@ class Memory:
         self.vectors = vector[None, :] if self.vectors is None else np.vstack([self.vectors, vector])
         self._save()
         return True
+
+    def _rebuild(self, keep_indexes):
+        if len(keep_indexes) < len(self.records):
+            self.backup()
+        self.records = [self.records[i] for i in keep_indexes]
+        self.vectors = self.vectors[keep_indexes] if self.records else None
+        self._plain = {}
+        self._save()
+
+    def compact(self, kind: str = "lesson", threshold: float = None) -> int:
+        """Merge near-duplicate memories (the same lesson worded differently). Returns how many merged."""
+        threshold = threshold or getattr(self.embedder, "same_lesson", 0.9)
+        idx = [i for i, r in enumerate(self.records) if r["kind"] == kind]
+        if len(idx) < 2:
+            return 0
+        plain = _normalize(self.embedder.embed([self.records[i]["text"] for i in idx]))
+        # Keep the most-seen version of each group, and add up how often the group came up.
+        order = sorted(range(len(idx)), key=lambda j: self.records[idx[j]]["meta"].get("seen", 1), reverse=True)
+        kept, dropped = [], set()
+        for j in order:
+            if j in dropped:
+                continue
+            kept.append(j)
+            sims = plain @ plain[j]
+            for other in order:
+                if other != j and other not in dropped and other not in kept and sims[other] >= threshold:
+                    dropped.add(other)
+                    keeper = self.records[idx[j]]["meta"]
+                    keeper["seen"] = keeper.get("seen", 1) + self.records[idx[other]]["meta"].get("seen", 1)
+        drop_records = {idx[j] for j in dropped}
+        self._rebuild([i for i in range(len(self.records)) if i not in drop_records])
+        return len(drop_records)
+
+    def find(self, text: str, kind: str = "lesson", by_meaning: bool = False, threshold: float = 0.9) -> list:
+        """Indexes of memories that contain these exact words (or, if by_meaning, nearly identical ones)."""
+        idx = [i for i, r in enumerate(self.records) if r["kind"] == kind]
+        if not idx:
+            return []
+        def simple(t):
+            return " ".join(re.sub(r"[^a-z0-9 ]", " ", t.lower()).split())
+        needle = simple(text)
+        hits = [i for i in idx if needle and needle in simple(self.records[i]["text"])]
+        if by_meaning:
+            q = _normalize(self.embedder.embed([text]))[0]
+            plain = _normalize(self.embedder.embed([self.records[i]["text"] for i in idx]))
+            hits += [i for i, score in zip(idx, plain @ q) if score >= threshold and i not in hits]
+        return hits
+
+    def backup(self):
+        """Copy the current memory aside so the next change can be undone."""
+        import shutil
+        for path in (self.records_path, self.vectors_path):
+            if os.path.exists(path):
+                shutil.copy(path, path + ".bak")
+
+    def undo(self) -> bool:
+        """Restore the copy saved before the last forget or compact."""
+        import shutil
+        if not os.path.exists(self.records_path + ".bak"):
+            return False
+        for path in (self.records_path, self.vectors_path):
+            if os.path.exists(path + ".bak"):
+                shutil.copy(path + ".bak", path)
+        return True
+
+    def forget(self, text: str, kind: str = "lesson", threshold: float = 0.75) -> list:
+        """Remove memories that closely match text. Returns the texts removed."""
+        if self.vectors is None:
+            return []
+        hits = set(self.find(text, kind, threshold))
+        removed = [self.records[i]["text"] for i in sorted(hits)]
+        self._rebuild([i for i in range(len(self.records)) if i not in hits])
+        return removed
+
+    def diverse(self, candidates: list, k: int, too_similar: float = 0.8) -> list:
+        """Pick up to k memories in order, skipping any that repeat one already picked."""
+        picked, picked_vecs = [], []
+        for m in candidates:
+            if len(picked) >= k:
+                break
+            if m["text"] not in self._plain:
+                self._plain[m["text"]] = _normalize(self.embedder.embed([m["text"]]))[0]
+            v = self._plain[m["text"]]
+            if any(float(v @ p) >= too_similar for p in picked_vecs):
+                continue
+            picked.append(m)
+            picked_vecs.append(v)
+        return picked
 
     def recurring(self, kind: str, min_seen: int = 2, k: int = 3) -> list:
         """Memories of this kind that came up again and again, most frequent first."""
@@ -249,7 +345,8 @@ def remember_job(memory: Memory, brief: str, work: str, reviews: list, status: s
                meta={"deliverable": deliverable, "outcome": outcome, "summary": core[:140]})
     saved = 0
     for lesson in distill_lessons(brain, reviews):
-        if memory.add("lesson", lesson, meta={"from": core[:140]}, dedupe=0.9, context=core[:600]):
+        if memory.add("lesson", lesson, meta={"from": core[:140]}, context=core[:600],
+                      dedupe=getattr(memory.embedder, "same_lesson", 0.9)):
             saved += 1
     return saved
 
@@ -258,13 +355,13 @@ def recall_for_job(memory: Memory, brief: str, k_lessons: int = 6, k_jobs: int =
     """Text to add to a new job's brief: relevant lessons and similar past jobs."""
     core = _brief_core(brief)
     recurring = memory.recurring("lesson", k=3)                       # mistakes that keep coming back
-    related = memory.query(core, kind="lesson", k=k_lessons)          # lessons from similar jobs
-    seen_texts = {r["text"] for r in recurring}
-    lessons = recurring + [m for m in related if m["text"] not in seen_texts][:k_lessons - len(recurring)]
+    related = memory.query(core, kind="lesson", k=k_lessons * 4)      # lessons from similar jobs
+    lessons = memory.diverse(recurring + related, k=k_lessons)        # each one saying something different
     jobs = memory.query(core, kind="job", k=k_jobs)
     if not lessons and not jobs:
         return ""
-    parts = ["LESSONS FROM PAST JOBS (Jarvis memory: apply them where relevant, ignore any that don't fit):"]
+    parts = ["LESSONS FROM PAST JOBS (Jarvis memory: apply them where relevant, ignore any that don't fit.",
+             "These come from older jobs; if one conflicts with your instructions above, follow the instructions):"]
     parts += [f"- {m['text']}" + (f" (came up {m['meta']['seen']} times)" if m["meta"].get("seen", 1) > 1 else "")
               for m in lessons]
     if jobs:
@@ -305,7 +402,9 @@ def backfill(memory: Memory, runs_dir="runs", gigs_csv="graded_gigs.csv", brain=
     import csv
     import glob
     counts = {"jobs": 0, "lessons": 0, "gigs": 0}
-    for folder in sorted(glob.glob(os.path.join(runs_dir, "*"))):
+    folders = sorted(glob.glob(os.path.join(runs_dir, "*")))
+    for n, folder in enumerate(folders, start=1):
+        print(f"  [{n}/{len(folders)}] {os.path.basename(folder)}", flush=True)
         brief_path = os.path.join(folder, "00_brief.txt")
         if not os.path.isfile(brief_path):
             continue
@@ -327,9 +426,13 @@ def backfill(memory: Memory, runs_dir="runs", gigs_csv="graded_gigs.csv", brain=
         status = "approved" if final.endswith("FINAL_deliverable.md") else "not approved"
         rounds = len([r for r in glob.glob(os.path.join(folder, "[0-9][0-9]_qa_review.json"))])
         before = len([r for r in memory.records if r["kind"] == "job"])
-        counts["lessons"] += remember_job(memory, brief, work, reviews, status, max(rounds, 1), brain)
+        try:
+            counts["lessons"] += remember_job(memory, brief, work, reviews, status, max(rounds, 1), brain)
+        except Exception as e:  # one bad folder shouldn't stop the whole backfill
+            print(f"      skipped ({type(e).__name__}: {e})", flush=True)
         counts["jobs"] += len([r for r in memory.records if r["kind"] == "job"]) - before
     if os.path.exists(gigs_csv):
+        print(f"  Graded gigs from {gigs_csv}...", flush=True)
         with open(gigs_csv, encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 verdict = {"title": row.get("title", ""), "recommendation": row.get("jarvis_recommendation", ""),
@@ -340,7 +443,10 @@ def backfill(memory: Memory, runs_dir="runs", gigs_csv="graded_gigs.csv", brain=
                 except json.JSONDecodeError:
                     pass
                 before = len(memory.records)
-                remember_gig(memory, row.get("listing", ""), verdict, row.get("your_decision", "?"))
+                try:
+                    remember_gig(memory, row.get("listing", ""), verdict, row.get("your_decision", "?"))
+                except Exception as e:
+                    print(f"      skipped a gig ({type(e).__name__}: {e})", flush=True)
                 counts["gigs"] += len(memory.records) - before
     return counts
 
@@ -355,12 +461,25 @@ if __name__ == "__main__":
     parser.add_argument("--stats", action="store_true", help="show what's stored")
     parser.add_argument("--search", default="", help="find the memories closest to this text")
     parser.add_argument("--backfill", action="store_true", help="learn from existing runs/ and graded_gigs.csv")
+    parser.add_argument("--compact", action="store_true",
+                        help="merge lessons that say the same thing in different words")
+    parser.add_argument("--forget", default="",
+                        help="remove lessons that closely match this text (shows them and asks first)")
+    parser.add_argument("--lessons", action="store_true", help="list every stored lesson")
+    parser.add_argument("--add", default="", help="write a lesson into memory yourself")
+    parser.add_argument("--undo", action="store_true", help="undo the last forget or compact")
     parser.add_argument("--brain", default="", choices=["", "claude", "ollama"],
                         help="with --backfill: use a model to distill general lessons")
     args = parser.parse_args()
 
+    if args.undo:
+        restored = Memory().undo()
+        print("Restored memory to before the last forget/compact." if restored else "Nothing to undo.")
     mem = Memory()
     print(f"Jarvis memory: {len(mem)} memories, embeddings by {mem.embedder.name}")
+    if args.add:
+        added = mem.add("lesson", args.add, meta={"from": "added by Marro", "seen": 2})
+        print("Lesson added." if added else "A lesson saying the same thing is already stored.")
     if isinstance(mem.embedder, KeywordEmbedder):
         print("  (Tip: for meaning-based search, run: ollama pull nomic-embed-text)")
     if args.backfill:
@@ -370,7 +489,27 @@ if __name__ == "__main__":
             brain = get_brain(args.brain)
         counts = backfill(mem, brain=brain)
         print(f"Backfill added {counts['jobs']} jobs, {counts['lessons']} lessons, {counts['gigs']} gigs.")
-    if args.stats or not (args.search or args.backfill):
+    if args.compact:
+        merged = mem.compact("lesson")
+        print(f"Merged {merged} duplicate lesson{'s' if merged != 1 else ''}. "
+              f"{sum(1 for r in mem.records if r['kind'] == 'lesson')} lessons remain.")
+    if args.forget:
+        matches = [mem.records[i]["text"] for i in mem.find(args.forget)]
+        if not matches:
+            print("No lessons closely match that text. Try --lessons to see them all.")
+        else:
+            print("These lessons would be forgotten:")
+            for t in matches:
+                print(f"  - {t}")
+            if input("Forget them? (y/n): ").strip().lower() == "y":
+                print(f"Forgot {len(mem.forget(args.forget))} lesson(s).")
+    if args.lessons:
+        for r in sorted((r for r in mem.records if r["kind"] == "lesson"),
+                        key=lambda r: r["meta"].get("seen", 1), reverse=True):
+            seen = r["meta"].get("seen", 1)
+            print(f"  ({seen}x) {r['text']}")
+    if args.stats or not (args.search or args.backfill or args.compact or args.forget or args.lessons
+                          or args.add or args.undo):
         kinds = {}
         for r in mem.records:
             kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
