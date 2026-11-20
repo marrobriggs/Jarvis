@@ -7,6 +7,8 @@ Flow for each round:
 
 Usage:
   python orchestrator.py sample_brief.txt --data sample_sales.csv               # fake brain
+  python orchestrator.py jobs/my-job/brief.txt --data jobs/my-job --brain claude
+      (--data can be one file, a folder of files, or a zip, which gets unzipped)
   python orchestrator.py sample_brief.txt --data sample_sales.csv --brain ollama
   python orchestrator.py sample_brief.txt --data sample_sales.csv --brain claude
 
@@ -17,15 +19,83 @@ Needs pandas and plotly installed in the Python you run this with.
 import argparse
 import json
 import os
-import shutil
 from datetime import datetime
 
 from agents import run_analyst, run_qa
 from brains import get_brain
-from executor import describe_run, extract_code, run_code
+from data_preview import preview_many, stage_data
+from executor import (APPROVED_PACKAGES, describe_run, extract_code, install_package,
+                      is_installed, parse_requirements, run_code)
 
 MAX_ROUNDS = 3       # QA review rounds
 MAX_FIX_TRIES = 3    # times the analyst may fix crashing code within one round
+CODE_TIMEOUT = 600   # seconds a script may run; big Excel files need several minutes
+
+# Packages the analyst may use, if they're installed on this computer.
+CHECK_PACKAGES = ["pandas", "numpy", "plotly", "openpyxl", "matplotlib", "scipy",
+                  "statsmodels", "seaborn", "pyarrow", "kaleido", "python_calamine", "xlsxwriter"]
+
+
+def environment_info() -> str:
+    """Describe this computer so the analyst writes code that actually runs here."""
+    import importlib.util
+    import platform
+    import sys
+
+    available = [p for p in CHECK_PACKAGES if importlib.util.find_spec(p)]
+    missing = [p for p in CHECK_PACKAGES if p not in available]
+    return (f"Operating system: {platform.system()} {platform.release()}\n"
+            f"Python version: {platform.python_version()}\n"
+            f"Installed packages you may use: {', '.join(available) or 'none detected'}\n"
+            f"NOT installed (do not use): {', '.join(missing) or 'none'}\n"
+            f"Time limit: the script is stopped after {CODE_TIMEOUT // 60} minutes.\n"
+            "Rules: never install packages inside your code (no pip, no subprocess), never use "
+            "multiprocessing, and only read and write files inside the working folder. If you "
+            "truly need a package that isn't installed, put one line at the very top of your "
+            "answer: REQUIREMENTS: name1, name2. Jarvis will install approved packages and ask "
+            "Marro about any others.")
+
+
+def handle_requirements(work: str, decisions: dict) -> str:
+    """Install the packages the analyst asked for, asking you about unfamiliar ones.
+
+    decisions remembers your answers for this job, so you're asked once per package.
+    Returns a note for the analyst about anything that couldn't be installed.
+    """
+    problems = []
+    for pkg in parse_requirements(work):
+        if pkg in decisions:
+            if decisions[pkg] != "ok":
+                problems.append(f"{pkg}: {decisions[pkg]}")
+            continue
+        if is_installed(pkg):
+            decisions[pkg] = "ok"
+            continue
+
+        if pkg in APPROVED_PACKAGES:
+            print(f"           Analyst needs '{pkg}' (on the approved list). Installing...")
+        else:
+            print(f"\n  >>> The analyst wants to install '{pkg}', which is NOT on the approved list.")
+            print(f"      Check it first: https://pypi.org/project/{pkg}/")
+            answer = ""
+            try:
+                while answer not in ("y", "n"):
+                    answer = input(f"      Allow installing '{pkg}'? (y/n): ").strip().lower()
+            except EOFError:  # no one at the keyboard: play it safe
+                answer = "n"
+            if answer != "y":
+                decisions[pkg] = "declined by Marro, so work without it"
+                problems.append(f"{pkg}: {decisions[pkg]}")
+                print(f"           Declined. The analyst will work without '{pkg}'.")
+                continue
+            print(f"           Approved. Installing '{pkg}'...")
+
+        ok, message = install_package(pkg)
+        decisions[pkg] = "ok" if ok else f"install failed ({message}), so work without it"
+        print(f"           {pkg}: {'installed' if ok else 'install failed: ' + message}")
+        if not ok:
+            problems.append(f"{pkg}: {decisions[pkg]}")
+    return "\n".join(problems)
 
 
 def save(folder: str, name: str, content: str) -> None:
@@ -33,7 +103,8 @@ def save(folder: str, name: str, content: str) -> None:
         f.write(content)
 
 
-def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> dict:
+def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
+                 brief_path: str = "") -> dict:
     brain = get_brain(brain_name)
     folder = os.path.join("runs", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     workdir = os.path.join(folder, "work")
@@ -42,12 +113,28 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> d
 
     data_file = ""
     if data_path:
-        data_file = os.path.basename(data_path)
-        shutil.copy(data_path, os.path.join(workdir, data_file))
+        if not os.path.exists(data_path):
+            raise SystemExit(f"Jarvis: can't find the data at {data_path}")
+        # Copy the client's file, folder or zip into the work folder (zips get unzipped).
+        files = stage_data(data_path, workdir, exclude=[brief_path])
+        if not files:
+            raise SystemExit(f"Jarvis: no data files found in {data_path}")
+        data_file = ", ".join(files)
+        print(f"Jarvis: staged {len(files)} data file(s): {data_file}")
+        # Show the agents what's really in the data, so nobody guesses column names.
+        profile = preview_many(workdir, files)
+        save(folder, "00_data_preview.txt", profile)
+        brief = brief + "\n\nDATA PREVIEW (generated automatically by Jarvis):\n" + profile
+        print("Jarvis: data preview built and shared with the agents.")
+
+    env = environment_info()
+    save(folder, "00_environment.txt", env)
+    brief = brief + "\n\nRUNTIME ENVIRONMENT (your code runs here):\n" + env
 
     print(f"Jarvis: starting job with the '{brain_name}' brain. Saving to {folder}\n")
 
     work, review, run = "", None, None
+    package_decisions = {}   # your install answers, remembered for this job
     for round_num in range(1, MAX_ROUNDS + 1):
         print(f"[Round {round_num}] Analyst is working...")
         work = run_analyst(brain, brief, data_file, previous_work=work,
@@ -55,7 +142,10 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> d
 
         # The agent loop: run the code, and let the analyst fix its own errors.
         for attempt in range(1, MAX_FIX_TRIES + 1):
-            run = run_code(extract_code(work), workdir)
+            package_note = handle_requirements(work, package_decisions)
+            run = run_code(extract_code(work), workdir, timeout=CODE_TIMEOUT)
+            if package_note and not run["ok"]:
+                run["stderr"] = ("PACKAGES NOT AVAILABLE:\n" + package_note + "\n\n" + run["stderr"]).strip()
             tag = f"{round_num:02d}{chr(96 + attempt)}"  # 01a, 01b, 01c...
             save(folder, f"{tag}_analyst.md", work)
             save(folder, f"{tag}_code_run.txt", describe_run(run))
@@ -82,7 +172,8 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> d
             if extract_code(drafted) == extract_code(work):
                 work = drafted
             else:  # the code changed, so check that the new version still runs
-                rerun = run_code(extract_code(drafted), workdir)
+                handle_requirements(drafted, package_decisions)
+                rerun = run_code(extract_code(drafted), workdir, timeout=CODE_TIMEOUT)
                 if rerun["ok"]:
                     work, run = drafted, rerun
             save(folder, f"{round_num:02d}z_with_findings.md", work)
@@ -111,9 +202,10 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> d
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a client brief through Jarvis's agents.")
     parser.add_argument("brief_file", help="text file containing the client brief")
-    parser.add_argument("--data", default="", help="the client's data file (CSV, Excel, etc.)")
+    parser.add_argument("--data", default="",
+                        help="the client's data: a file, a folder of files, or a zip")
     parser.add_argument("--brain", default="mock", choices=["mock", "ollama", "claude"])
     args = parser.parse_args()
 
     with open(args.brief_file, encoding="utf-8") as f:
-        run_pipeline(f.read(), args.brain, args.data)
+        run_pipeline(f.read(), args.brain, args.data, brief_path=args.brief_file)

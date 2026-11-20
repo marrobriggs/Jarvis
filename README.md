@@ -73,7 +73,13 @@ Results land in `runs/<timestamp>/`: each draft, each code run, each QA review, 
 - [x] Gig grader with structured JSON output and decision logging
 - [x] Multi-agent analyst / QA loop with a swappable model backend
 - [x] Code execution with self-correction
-- [ ] Connect the grader to the pipeline
+- [x] Connect the grader to the pipeline (accepted gigs become job folders)
+- [x] Claude API backend for fast grading and analysis
+- [x] Automatic data preview (columns, types, missing values) for every file
+- [x] Multi-file, folder and zip data support with safe unzipping
+- [x] Safety: secrets hidden from AI-written code, risky commands blocked,
+      human approval for unfamiliar package installs
+- [ ] Polish round: apply QA's suggestions before final delivery
 - [ ] Reporter agent that packages approved work into a client-ready report
 - [ ] Retrieval (RAG) over past gigs and deliverables
 - [ ] Voice interface

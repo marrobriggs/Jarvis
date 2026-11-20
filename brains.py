@@ -46,8 +46,8 @@ class MockBrain:
             self.analyst_calls += 1
             data_file = "data.csv"
             for line in user_message.splitlines():
-                if line.startswith("DATA FILE:"):
-                    data_file = line.split(":", 1)[1].strip()
+                if line.startswith("DATA FILES"):
+                    data_file = line.split(":", 1)[1].split(",")[0].strip()
 
             if self.analyst_calls == 1:
                 # First draft has a deliberate bug (wrong column name),

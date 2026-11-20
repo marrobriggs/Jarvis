@@ -7,8 +7,9 @@ Every decision is logged to graded_gigs.csv for later evaluation.
 Gigs you accept are saved as job folders, ready for orchestrator.py.
 
 Usage:
-  python gig_grader.py          # real grading with Ollama (slow on a laptop)
-  python gig_grader.py --mock   # instant fake grades, for testing the plumbing
+  python gig_grader.py                  # grade with Ollama on this laptop (free, slow)
+  python gig_grader.py --brain claude   # grade with Claude via the API (fast, under a cent)
+  python gig_grader.py --mock           # instant fake grades, for testing the plumbing
 
 Setup for real grading:
   1. Install Ollama: https://ollama.com
@@ -116,6 +117,14 @@ def grade_gig(listing: str) -> dict:
     with opener.open(req, timeout=900) as resp:
         body = json.loads(resp.read().decode("utf-8"))
     return json.loads(body["message"]["content"])
+
+
+def grade_with_claude(listing: str) -> dict:
+    """Grade a listing with Claude through the API (uses brains.py)."""
+    from brains import ClaudeBrain
+    raw = ClaudeBrain(max_tokens=2000).think(SYSTEM_PROMPT, listing, json_mode=True)
+    start, end = raw.find("{"), raw.rfind("}")   # ignore any ```json fences around it
+    return json.loads(raw[start:end + 1] if start != -1 else raw)
 
 
 def mock_grade(listing: str) -> dict:
@@ -235,25 +244,45 @@ def read_listing() -> str:
     return "\n".join(lines).strip()
 
 
-def main(mock: bool = False) -> None:
-    print("Jarvis Gig Grader is online." + (" (MOCK MODE: fake instant grades)" if mock else "") + "\n")
+def main(brain: str = "ollama") -> None:
+    mock = brain == "mock"
+    labels = {"mock": " (MOCK MODE: fake instant grades)", "ollama": " (Ollama, on this laptop)",
+              "claude": " (Claude, via the API)"}
+    print("Jarvis Gig Grader is online." + labels[brain] + "\n")
     while True:
         listing = read_listing()
         if not listing:
             print("Shutting down. Good hunting.")
             break
 
-        print("\nGrading..." if mock else "\nGrading... (the first one can take a few minutes on a laptop)")
+        print("\nGrading... (the first one can take a few minutes on a laptop)" if brain == "ollama"
+              else "\nGrading...")
         start = datetime.now()
         try:
-            verdict = enforce_ml_rule(mock_grade(listing) if mock else grade_gig(listing))
+            if mock:
+                raw_verdict = mock_grade(listing)
+            elif brain == "claude":
+                raw_verdict = grade_with_claude(listing)
+            else:
+                raw_verdict = grade_gig(listing)
+            verdict = enforce_ml_rule(raw_verdict)
+            verdict["graded_by"] = brain   # recorded in the log, to compare brains later
             print(f"Done in {(datetime.now() - start).seconds} seconds.")
         except urllib.error.HTTPError as e:
-            print(f"Ollama returned an error ({e.code}): {e.read().decode('utf-8', 'ignore')}")
+            source = "Claude API" if brain == "claude" else "Ollama"
+            print(f"{source} returned an error ({e.code}): {e.read().decode('utf-8', 'ignore')}")
+            if brain == "claude" and e.code == 401:
+                print("Your API key was rejected. Check ANTHROPIC_API_KEY.")
+            continue
+        except RuntimeError as e:   # e.g. no API key set
+            print(e)
             continue
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"Couldn't reach Ollama: {e}")
-            print("Check http://127.0.0.1:11434 in your browser, or run: ollama serve")
+            if brain == "claude":
+                print(f"Couldn't reach the Claude API: {e}. Check your internet connection.")
+            else:
+                print(f"Couldn't reach Ollama: {e}")
+                print("Check http://127.0.0.1:11434 in your browser, or run: ollama serve")
             continue
         except (json.JSONDecodeError, KeyError):
             print("The model didn't return clean JSON. Try again or use a bigger model.")
@@ -273,15 +302,18 @@ def main(mock: bool = False) -> None:
         if decision == "y":
             folder = save_job(listing, verdict)
             brief = os.path.join(folder, "brief.txt")
-            data = os.path.join(folder, "YOUR_DATA_FILE.csv")
             print(f"Job saved to {folder}")
-            print("When the client sends data, put it in that folder and run:")
-            print(f"  python orchestrator.py \"{brief}\" --data \"{data}\"")
+            print("When the client sends data (CSV, Excel, a zip, or several files),")
+            print("put it in that folder and run:")
+            print(f"  python orchestrator.py \"{brief}\" --data \"{folder}\" --brain claude")
         print()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Grade freelance job listings.")
+    parser.add_argument("--brain", default="ollama", choices=["mock", "ollama", "claude"],
+                        help="who does the grading (default: ollama)")
     parser.add_argument("--mock", action="store_true",
-                        help="instant fake grades, for testing without Ollama")
-    main(mock=parser.parse_args().mock)
+                        help="shortcut for --brain mock")
+    args = parser.parse_args()
+    main(brain="mock" if args.mock else args.brain)

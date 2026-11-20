@@ -16,12 +16,22 @@ Do not build machine learning models unless the brief explicitly asks for one.
 
 YOUR CODE IS ACTUALLY RUN. Rules for the code:
 - Put all code in ONE ```python block. It runs as one script, top to bottom.
-- Read the data from the file name given under DATA FILE.
+- Read the data from the files listed under DATA FILES, using those exact paths.
+  If there are several related tables, join them on their shared ID columns,
+  and check the DATA PREVIEW (including any data dictionary) before assuming anything.
 - Save every chart with fig.write_html("chart_name.html"). Never call fig.show().
 - For an interactive dashboard, build ONE Plotly HTML file with dropdown menus.
   Do not write separate app files, servers or Streamlit apps unless the brief demands it.
 - print() every number your findings rely on, with clear labels.
 - Keep the script focused: roughly 150 lines or fewer.
+- Follow the RUNTIME ENVIRONMENT section: prefer the installed packages listed,
+  write code for that operating system, and never use multiprocessing.
+- Never install packages inside your code. If you truly need one that isn't
+  installed, put this as the very first line of your answer:
+  REQUIREMENTS: package-name, other-package
+  Jarvis installs approved packages and asks Marro about any others. Use exact
+  PyPI names, and only well-known packages. If one gets declined, work without it.
+- For very large files, read them once and cache to CSV.
 
 BE CONCISE. Your answer has a length limit, and if it is cut off the code won't run.
 Your deliverable, in Markdown, in this order:
@@ -63,7 +73,7 @@ def run_analyst(brain, brief: str, data_file: str = "", previous_work: str = "",
     """Ask the analyst for a draft, a fix, findings from real output, or a QA revision."""
     message = f"CLIENT BRIEF:\n{brief}"
     if data_file:
-        message += f"\n\nDATA FILE: {data_file}"
+        message += f"\n\nDATA FILES (in your working folder): {data_file}"
     if previous_work:
         message += f"\n\nYOUR PREVIOUS WORK:\n{previous_work}"
     if code_errors:
