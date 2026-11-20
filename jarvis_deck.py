@@ -43,6 +43,45 @@ def _rgb(hex_color: str) -> RGBColor:
     return RGBColor.from_string(hex_color.lstrip("#"))
 
 
+def _lines(text, size_pt, width_in):
+    """Rough count of how many lines text wraps to (Segoe UI averages ~0.52 em per character)."""
+    chars_per_line = max(1, int(width_in * 72 / (size_pt * 0.52)))
+    lines, current = 1, 0
+    for word in str(text).split():
+        if current and current + 1 + len(word) > chars_per_line:
+            lines, current = lines + 1, len(word)
+        else:
+            current += (1 if current else 0) + len(word)
+    return lines
+
+
+_FONT_FILES = {  # Segoe UI on Windows first; similar-width fonts elsewhere
+    True: ["C:/Windows/Fonts/segoeuib.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+           "C:/Windows/Fonts/arialbd.ttf", "/Library/Fonts/Arial Bold.ttf"],
+    False: ["C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf", "/Library/Fonts/Arial.ttf"],
+}
+_font_cache = {}
+
+
+def _fits(text, size_pt, width_in, bold=False) -> bool:
+    """True if text fits on one line at this size: measured with the real font when possible."""
+    if bold not in _font_cache:
+        _font_cache[bold] = None
+        try:
+            from PIL import ImageFont
+            import os
+            for path in _FONT_FILES[bold]:
+                if os.path.exists(path):
+                    _font_cache[bold] = ImageFont.truetype(path, 100)
+                    break
+        except ImportError:
+            pass
+    font = _font_cache[bold]
+    em = font.getlength(str(text)) / 100 if font else len(str(text)) * 0.62
+    return em * size_pt * 1.06 <= width_in * 72      # 6% safety margin
+
+
 def _text(frame, text, size, color=jt.INK, bold=False, align=PP_ALIGN.LEFT):
     frame.clear()
     frame.word_wrap = True
@@ -77,19 +116,30 @@ class Deck:
         return slide.shapes.add_textbox(left, top, width, height).text_frame
 
     def _header(self, slide, title, takeaway=""):
-        """Slide title (the takeaway headline), a short accent rule, and an optional explanation."""
-        frame = self._box(slide, MARGIN, Inches(0.45), W - 2 * MARGIN, Inches(0.9))
-        _text(frame, title, 26, bold=True)
+        """Slide title (the takeaway headline), a short accent rule, and an optional explanation.
+
+        Everything below the title is positioned from the title's estimated height, so a
+        long title that wraps pushes the rule and takeaway down instead of overlapping them.
+        """
+        width_in = (W - 2 * MARGIN) / 914400
+        size = 26 if len(title) <= 60 else 22 if len(title) <= 90 else 20
+        title_lines = _lines(title, size, width_in)
+        title_h = Pt(size * 1.2 * title_lines + 6)
+        frame = self._box(slide, MARGIN, Inches(0.4), W - 2 * MARGIN, title_h)
+        _text(frame, title, size, bold=True)
         frame.vertical_anchor = MSO_ANCHOR.TOP
-        rule = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, MARGIN, Inches(1.32), Inches(0.9), Emu(38100))
+
+        rule_top = Inches(0.4) + title_h + Inches(0.1)
+        rule = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, MARGIN, rule_top, Inches(0.9), Emu(38100))
         rule.fill.solid()
         rule.fill.fore_color.rgb = _rgb(jt.PALETTE[0])
         rule.line.fill.background()
-        top = Inches(1.5)
+        top = rule_top + Inches(0.2)
         if takeaway:
-            t = self._box(slide, MARGIN, top, W - 2 * MARGIN, Inches(0.7))
+            take_h = Pt(15 * 1.3 * _lines(takeaway, 15, width_in) + 6)
+            t = self._box(slide, MARGIN, top, W - 2 * MARGIN, take_h)
             _text(t, takeaway, 15, color=jt.INK_2)
-            top = Inches(2.2)
+            top = top + take_h + Inches(0.15)
         self._footer(slide)
         return top
 
@@ -115,12 +165,21 @@ class Deck:
 
     # ------------------------------------------------------------------ slides
     def kpis(self, title, items, takeaway=""):
-        """3-4 headline numbers as cards: [(label, value), ...] or [(label, value, note), ...]."""
+        """3-4 headline numbers as cards: [(label, value), ...] or [(label, value, note), ...].
+
+        Keep each value to one short number ("+54%", "$4.0M"); comparisons go in the note.
+        All values share one font size, shrunk only as far as the longest value needs.
+        """
         slide = self._slide()
         top = self._header(slide, title, takeaway)
         items = list(items)[:4]
         gap = Inches(0.3)
         width = int((W - 2 * MARGIN - gap * (len(items) - 1)) / len(items))
+        inner_in = (width - Inches(0.6)) / 914400
+        # One value size for every card: the largest that keeps the longest value on one line.
+        value_size = 34
+        while value_size > 16 and not all(_fits(it[1], value_size, inner_in - 0.15, bold=True) for it in items):
+            value_size -= 2
         for i, item in enumerate(items):
             left = MARGIN + i * (width + gap)
             card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top + Inches(0.4), width, Inches(2.2))
@@ -129,10 +188,10 @@ class Deck:
             card.fill.fore_color.rgb = _rgb(jt.SURFACE)
             card.line.color.rgb = _rgb(jt.GRID)
             card.shadow.inherit = False
-            lab = self._box(slide, left + Inches(0.3), top + Inches(0.65), width - Inches(0.6), Inches(0.5))
-            _text(lab, item[0], 14, color=jt.INK_2)
-            val = self._box(slide, left + Inches(0.3), top + Inches(1.1), width - Inches(0.6), Inches(0.9))
-            _text(val, item[1], 34, bold=True)
+            lab = self._box(slide, left + Inches(0.3), top + Inches(0.6), width - Inches(0.6), Inches(0.55))
+            _text(lab, item[0], 13 if _lines(item[0], 14, inner_in) > 1 else 14, color=jt.INK_2)
+            val = self._box(slide, left + Inches(0.3), top + Inches(1.15), width - Inches(0.6), Inches(0.8))
+            _text(val, item[1], value_size, bold=True)
             if len(item) > 2 and item[2]:
                 note = self._box(slide, left + Inches(0.3), top + Inches(1.9), width - Inches(0.6), Inches(0.5))
                 _text(note, item[2], 11, color=jt.MUTED)

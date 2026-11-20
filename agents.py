@@ -56,7 +56,9 @@ FOR SLIDES: at the end of analysis.py, build the deck with the Jarvis deck build
 (Jarvis provides it; do not write it, and do not use python-pptx directly):
     import jarvis_deck as jd
     deck = jd.Deck("<title>", "<data and period>", source="Source: <data>")
-    deck.kpis("<headline>", [(label, value), ...], takeaway="...")    3-4 numbers
+    deck.kpis("<headline>", [(label, value, note), ...], takeaway="...")    3-4 cards
+             One short number per card (e.g. "+54%", "$4.0M", "971"); put comparisons and
+             context in the note, e.g. ("Promo sign-ups", "971", "+54% vs same months 2017").
     deck.bar(title, categories, values, takeaway=..., number_format='"$"#,##0',
              value_title="Profit ($)", highlight=<category to emphasize or None>)
     deck.grouped_bar(title, categories, {"Revenue": [...], "Profit": [...]}, takeaway=..., ...)
