@@ -221,8 +221,21 @@ def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir
     return polished, prun, new_review, True
 
 
+def learn(memory, brief, work, reviews, status, rounds, brain, brain_name):
+    """After a job: save what it taught to memory (never stops the job if it fails)."""
+    if memory is None:
+        return
+    try:
+        from memory import remember_job
+        distiller = brain if brain_name != "mock" else None   # mock answers are canned, not lessons
+        saved = remember_job(memory, brief, work, reviews, status, rounds, distiller)
+        print(f"\nJarvis: job saved to memory ({saved} new lesson{'s' if saved != 1 else ''}).")
+    except Exception as e:
+        print(f"\nJarvis: couldn't save to memory ({type(e).__name__}: {e}).")
+
+
 def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
-                 brief_path: str = "", polish: bool = True) -> dict:
+                 brief_path: str = "", polish: bool = True, use_memory: bool = True) -> dict:
     brain = get_brain(brain_name)
     folder = os.path.join("runs", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     workdir = os.path.join(folder, "work")
@@ -250,9 +263,29 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
     save(folder, "00_environment.txt", env)
     brief = brief + "\n\nRUNTIME ENVIRONMENT (your code runs here):\n" + env
 
+    # Memory: recall lessons and similar jobs from the past (never blocks a job).
+    memory = None
+    if use_memory:
+        try:
+            from memory import Memory, recall_for_job
+            memory = Memory()
+            recalled = recall_for_job(memory, brief)
+            if recalled:
+                brief = brief + "\n\n" + recalled
+                save(folder, "00_memory.txt", recalled)
+                n_lessons = recalled.split("Similar past jobs:")[0].count("\n- ")
+                n_jobs = recalled.split("Similar past jobs:")[1].count("\n- ") if "Similar past jobs:" in recalled else 0
+                print(f"Jarvis: recalled {n_lessons} lesson(s) and {n_jobs} similar past job(s) from memory.")
+            elif len(memory):
+                print("Jarvis: nothing in memory closely matches this job.")
+        except Exception as e:
+            print(f"Jarvis: memory unavailable this run ({type(e).__name__}: {e}).")
+            memory = None
+
     print(f"Jarvis: starting job with the '{brain_name}' brain. Saving to {folder}\n")
 
     work, review, run = "", None, None
+    reviews = []             # every QA review, for memory
     package_decisions = {}   # your install answers, remembered for this job
     for round_num in range(1, MAX_ROUNDS + 1):
         print(f"[Round {round_num}] Analyst is working...")
@@ -264,6 +297,7 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
 
         print(f"[Round {round_num}] QA manager is reviewing the work and its output...")
         review = run_qa(brain, brief, work, describe_run(run), previous_review=review)
+        reviews.append(review)
         if not run["ok"]:
             review["verdict"] = "REVISE"  # code that doesn't run never gets approved
         save(folder, f"{round_num:02d}_qa_review.json", json.dumps(review, indent=2))
@@ -277,9 +311,12 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
             polished = False
             if polish and any(not f.upper().startswith("BLOCKING") for f in review["feedback"]) \
                     and review["score"] < 10:
+                approved_review = review
                 work, run, review, polished = polish_round(
                     brain, brain_name, brief, data_file, work, run, review,
                     workdir, folder, package_decisions)
+                if review is not approved_review:
+                    reviews.append(review)
                 print()
             save(folder, "FINAL_deliverable.md", work)
             note = " (polished)" if polished else ""
@@ -311,11 +348,13 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
                 if os.path.isdir(working) and os.listdir(working):
                     n = len(os.listdir(working))
                     print(f"  (plus {n} working file{'s' if n != 1 else ''} in outputs\\working, for your reference)")
+            learn(memory, brief, work, reviews, "approved", round_num, brain, brain_name)
             return {"status": "approved", "rounds": round_num, "folder": folder}
 
     save(folder, "NEEDS_YOUR_REVIEW.md", work)
     print(f"Jarvis: not approved after {MAX_ROUNDS} rounds. Your call. "
           f"Latest draft: {os.path.join(folder, 'NEEDS_YOUR_REVIEW.md')}")
+    learn(memory, brief, work, reviews, "not approved", MAX_ROUNDS, brain, brain_name)
     return {"status": "needs_review", "rounds": MAX_ROUNDS, "folder": folder}
 
 
@@ -327,8 +366,10 @@ if __name__ == "__main__":
     parser.add_argument("--brain", default="mock", choices=["mock", "ollama", "claude"])
     parser.add_argument("--no-polish", action="store_true",
                         help="skip the polish round after approval (faster, cheaper)")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="don't recall or save memories for this run")
     args = parser.parse_args()
 
     with open(args.brief_file, encoding="utf-8") as f:
         run_pipeline(f.read(), args.brain, args.data, brief_path=args.brief_file,
-                     polish=not args.no_polish)
+                     polish=not args.no_polish, use_memory=not args.no_memory)

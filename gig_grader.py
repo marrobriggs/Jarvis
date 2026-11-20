@@ -71,6 +71,9 @@ GRADING RULES
 5. Note red flags: vague scope, unrealistic budget or deadline, requests for
    unpaid test work, asking to communicate or pay off-platform.
 6. Be honest. Do not inflate scores to be encouraging.
+7. If MARRO'S PAST DECISIONS ON SIMILAR LISTINGS are included, use them to understand
+   his preferences (for example, he keeps passing on low-paid writing gigs), and say so
+   in the one-line summary when it matters. Still grade this listing on its own merits.
 
 OUTPUT FORMAT
 
@@ -248,7 +251,17 @@ def main(brain: str = "ollama") -> None:
     mock = brain == "mock"
     labels = {"mock": " (MOCK MODE: fake instant grades)", "ollama": " (Ollama, on this laptop)",
               "claude": " (Claude, via the API)"}
-    print("Jarvis Gig Grader is online." + labels[brain] + "\n")
+    print("Jarvis Gig Grader is online." + labels[brain])
+    memory = None
+    if not mock:
+        try:
+            from memory import Memory
+            memory = Memory()
+            gigs = sum(1 for r in memory.records if r["kind"] == "gig")
+            print(f"Memory: {gigs} past decision{'s' if gigs != 1 else ''} on file.")
+        except Exception as e:
+            print(f"Memory unavailable ({type(e).__name__}: {e}).")
+    print()
     while True:
         listing = read_listing()
         if not listing:
@@ -261,10 +274,19 @@ def main(brain: str = "ollama") -> None:
         try:
             if mock:
                 raw_verdict = mock_grade(listing)
-            elif brain == "claude":
-                raw_verdict = grade_with_claude(listing)
             else:
-                raw_verdict = grade_gig(listing)
+                # Remind the grader how Marro decided on similar listings before.
+                context = ""
+                if memory is not None:
+                    try:
+                        from memory import recall_for_gig
+                        context = recall_for_gig(memory, listing)
+                        if context:
+                            print(f"(Recalled {context.count(chr(10) + '- ')} similar listing(s) you've graded before.)")
+                    except Exception:
+                        context = ""
+                to_grade = listing + ("\n\n" + context if context else "")
+                raw_verdict = grade_with_claude(to_grade) if brain == "claude" else grade_gig(to_grade)
             verdict = enforce_ml_rule(raw_verdict)
             verdict["graded_by"] = brain   # recorded in the log, to compare brains later
             print(f"Done in {(datetime.now() - start).seconds} seconds.")
@@ -297,6 +319,12 @@ def main(brain: str = "ollama") -> None:
             print("Mock mode: not logged, so fake grades stay out of your evaluation set.")
         else:
             log_decision(listing, verdict, "yes" if decision == "y" else "no")
+            if memory is not None:
+                try:
+                    from memory import remember_gig
+                    remember_gig(memory, listing, verdict, "yes" if decision == "y" else "no")
+                except Exception:
+                    pass
             print(f"Logged to {LOG_FILE}.")
 
         if decision == "y":
