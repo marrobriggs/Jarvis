@@ -17,13 +17,18 @@ import re
 import subprocess
 import sys
 
-MAX_OUTPUT_CHARS = 3000  # keep error messages short enough to send back to the model
+MAX_OUTPUT_CHARS = 8000  # keep error messages short enough to send back to the model
 
 
 def extract_code(markdown: str) -> str:
     """Return all ```python blocks from the analyst's answer, joined together."""
     blocks = re.findall(r"```(?:python|py)\s*\n(.*?)```", markdown, flags=re.DOTALL | re.IGNORECASE)
-    return "\n\n".join(block.strip() for block in blocks)
+    if blocks:
+        return "\n\n".join(block.strip() for block in blocks)
+    # A block that was opened but never closed (answer cut off): run what's there,
+    # so the error points at the cut-off line instead of "no code found".
+    unclosed = re.search(r"```(?:python|py)\s*\n(.*)", markdown, flags=re.DOTALL | re.IGNORECASE)
+    return unclosed.group(1).strip() if unclosed else ""
 
 
 def _trim(text: str) -> str:
@@ -44,11 +49,19 @@ def run_code(code: str, workdir: str, timeout: int = 120, filename: str = "analy
     with open(script, "w", encoding="utf-8") as f:
         f.write(code)
 
+    # Hide secrets from AI-written code: the script gets a copy of the
+    # environment with API keys and tokens removed.
+    safe_env = {
+        k: v for k, v in os.environ.items()
+        if not any(word in k.upper() for word in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
+    }
+
     before = set(os.listdir(workdir))
     try:
         result = subprocess.run(
             [sys.executable, filename],
             cwd=workdir,
+            env=safe_env,
             capture_output=True,
             text=True,
             timeout=timeout,

@@ -22,6 +22,7 @@ class MockBrain:
     def __init__(self):
         self.qa_calls = 0
         self.analyst_calls = 0
+        self.last_truncated = False
 
     def think(self, system_prompt: str, user_message: str) -> str:
         if "QA MANAGER" in system_prompt:
@@ -92,6 +93,7 @@ class OllamaBrain:
     def __init__(self, model: str = "llama3.2", url: str = "http://127.0.0.1:11434/api/chat"):
         self.model = model
         self.url = url
+        self.last_truncated = False
 
     def think(self, system_prompt: str, user_message: str, json_mode: bool = False) -> str:
         payload = {
@@ -114,6 +116,7 @@ class OllamaBrain:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # skip proxies
         with opener.open(req, timeout=1200) as resp:
             body = json.loads(resp.read().decode("utf-8"))
+        self.last_truncated = body.get("done_reason") == "length"
         return body["message"]["content"]
 
 
@@ -125,8 +128,10 @@ class ClaudeBrain:
     from a Claude Pro subscription.
     """
 
-    def __init__(self, model: str = "claude-sonnet-5-5"):
+    def __init__(self, model: str = "claude-sonnet-5-5", max_tokens: int = 12000):
         self.model = model
+        self.max_tokens = max_tokens   # room for a full analysis script plus write-up
+        self.last_truncated = False    # True if the last answer hit the length cap
         self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
             raise RuntimeError("Set the ANTHROPIC_API_KEY environment variable first.")
@@ -136,7 +141,7 @@ class ClaudeBrain:
             user_message += "\n\nRespond with only valid JSON, no other text."
         payload = {
             "model": self.model,
-            "max_tokens": 4000,
+            "max_tokens": self.max_tokens,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_message}],
         }
@@ -149,8 +154,9 @@ class ClaudeBrain:
                 "anthropic-version": "2023-06-01",
             },
         )
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=600) as resp:
             body = json.loads(resp.read().decode("utf-8"))
+        self.last_truncated = body.get("stop_reason") == "max_tokens"
         return "".join(block.get("text", "") for block in body["content"])
 
 

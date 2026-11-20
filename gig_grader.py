@@ -1,21 +1,27 @@
 """
-Jarvis Gig Grader - version 1 (manual)
+Jarvis Gig Grader
 
 Paste a freelance job listing, Jarvis grades it against your skills
 using a local Ollama model, then you decide yes or no.
 Every decision is logged to graded_gigs.csv for later evaluation.
+Gigs you accept are saved as job folders, ready for orchestrator.py.
 
-Setup:
+Usage:
+  python gig_grader.py          # real grading with Ollama (slow on a laptop)
+  python gig_grader.py --mock   # instant fake grades, for testing the plumbing
+
+Setup for real grading:
   1. Install Ollama: https://ollama.com
-  2. Pull a model:   ollama pull llama3.1
-  3. Run:            python gig_grader.py
+  2. Pull a model:   ollama pull llama3.2
 
 Uses only the Python standard library, so no pip installs needed.
 """
 
+import argparse
 import csv
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -112,6 +118,23 @@ def grade_gig(listing: str) -> dict:
     return json.loads(body["message"]["content"])
 
 
+def mock_grade(listing: str) -> dict:
+    """Instant fake verdict for testing the flow. No model, no waiting."""
+    first_line = next((l.strip() for l in listing.splitlines() if l.strip()), "Test gig")
+    return {
+        "title": first_line[:60],
+        "core_deliverable": "Mock grade: analysis and dashboard work (not a real judgment).",
+        "matched_skills": ["Python", "pandas", "Plotly", "Dash/Streamlit"],
+        "gaps": [],
+        "involves_ml": "none",
+        "fit_score": 8,
+        "pros": ["Mock pro: matches core skills"],
+        "cons": ["Mock con: this grade is fake"],
+        "red_flags": [],
+        "one_line_summary": "Mock mode: this is a test grade, not a real recommendation.",
+    }
+
+
 def enforce_ml_rule(verdict: dict) -> dict:
     """Decide the recommendation in code, not in the model.
 
@@ -184,6 +207,20 @@ def log_decision(listing: str, verdict: dict, decision: str) -> None:
         ])
 
 
+def save_job(listing: str, verdict: dict) -> str:
+    """Save an accepted gig as jobs/<date>_<title>/brief.txt and return the folder."""
+    title = verdict.get("title", "gig")
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "gig"
+    folder = os.path.join("jobs", f"{datetime.now():%Y-%m-%d}_{slug}")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "brief.txt"), "w", encoding="utf-8") as f:
+        f.write(f"Gig: {title}\n")
+        f.write(f"Core deliverable: {verdict.get('core_deliverable', '')}\n\n")
+        f.write("Original listing:\n")
+        f.write(listing)
+    return folder
+
+
 def read_listing() -> str:
     print("Paste the job listing, then type END on its own line and press Enter.")
     print("(Type QUIT to exit.)")
@@ -198,18 +235,18 @@ def read_listing() -> str:
     return "\n".join(lines).strip()
 
 
-def main() -> None:
-    print("Jarvis Gig Grader is online.\n")
+def main(mock: bool = False) -> None:
+    print("Jarvis Gig Grader is online." + (" (MOCK MODE: fake instant grades)" if mock else "") + "\n")
     while True:
         listing = read_listing()
         if not listing:
             print("Shutting down. Good hunting.")
             break
 
-        print("\nGrading... (the first one can take a few minutes on a laptop)")
+        print("\nGrading..." if mock else "\nGrading... (the first one can take a few minutes on a laptop)")
         start = datetime.now()
         try:
-            verdict = enforce_ml_rule(grade_gig(listing))
+            verdict = enforce_ml_rule(mock_grade(listing) if mock else grade_gig(listing))
             print(f"Done in {(datetime.now() - start).seconds} seconds.")
         except urllib.error.HTTPError as e:
             print(f"Ollama returned an error ({e.code}): {e.read().decode('utf-8', 'ignore')}")
@@ -227,9 +264,24 @@ def main() -> None:
         decision = ""
         while decision not in ("y", "n"):
             decision = input("Take this gig? (y/n): ").strip().lower()
-        log_decision(listing, verdict, "yes" if decision == "y" else "no")
-        print(f"Logged to {LOG_FILE}.\n")
+        if mock:
+            print("Mock mode: not logged, so fake grades stay out of your evaluation set.")
+        else:
+            log_decision(listing, verdict, "yes" if decision == "y" else "no")
+            print(f"Logged to {LOG_FILE}.")
+
+        if decision == "y":
+            folder = save_job(listing, verdict)
+            brief = os.path.join(folder, "brief.txt")
+            data = os.path.join(folder, "YOUR_DATA_FILE.csv")
+            print(f"Job saved to {folder}")
+            print("When the client sends data, put it in that folder and run:")
+            print(f"  python orchestrator.py \"{brief}\" --data \"{data}\"")
+        print()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Grade freelance job listings.")
+    parser.add_argument("--mock", action="store_true",
+                        help="instant fake grades, for testing without Ollama")
+    main(mock=parser.parse_args().mock)

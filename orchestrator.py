@@ -65,9 +65,27 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "") -> d
             first_error_line = (run["stderr"].splitlines() or ["unknown error"])[-1]
             print(f"           Code failed (attempt {attempt}): {first_error_line}")
             if attempt < MAX_FIX_TRIES:
+                errors = describe_run(run)
+                if getattr(brain, "last_truncated", False):
+                    print("           (The answer was cut off for length. Asking for a shorter one.)")
+                    errors = ("YOUR ANSWER WAS CUT OFF because it was too long, so the code was "
+                              "incomplete. Shorten the Approach, keep the script focused, and make "
+                              "sure the ```python block is closed.\n\n" + errors)
                 print("           Analyst is fixing the code...")
-                work = run_analyst(brain, brief, data_file, previous_work=work,
-                                   code_errors=describe_run(run))
+                work = run_analyst(brain, brief, data_file, previous_work=work, code_errors=errors)
+
+        # Findings are written from the real printed numbers, not guessed in advance.
+        if run["ok"] and brain_name != "mock":
+            print(f"[Round {round_num}] Analyst is writing findings from the real output...")
+            drafted = run_analyst(brain, brief, data_file, previous_work=work,
+                                  code_output=describe_run(run))
+            if extract_code(drafted) == extract_code(work):
+                work = drafted
+            else:  # the code changed, so check that the new version still runs
+                rerun = run_code(extract_code(drafted), workdir)
+                if rerun["ok"]:
+                    work, run = drafted, rerun
+            save(folder, f"{round_num:02d}z_with_findings.md", work)
 
         print(f"[Round {round_num}] QA manager is reviewing the work and its output...")
         review = run_qa(brain, brief, work, describe_run(run))
