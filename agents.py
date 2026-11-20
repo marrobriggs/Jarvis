@@ -86,10 +86,18 @@ FOR REPORT, FILE 2, "# file: app.py": a short, sleek Streamlit app.
     jt.footer("Source: ...", [caveats])       2-4 caveats
 - Use plotly.express or graph_objects. The Jarvis template sets fonts, background,
   gridlines and colors automatically. Do NOT set your own colors, templates or fonts.
-- Color rules: one series = no color argument (it uses the Jarvis blue).
-  Several categories: color_discrete_map=jt.color_map(<categories in a stable order>).
-  Highlighting one item: color_discrete_map=jt.highlight(categories, "<focus>").
+- Color rules (a color must mean the same thing everywhere in the report):
+  One series: no color argument (it uses the Jarvis blue).
+  The story is about 1-2 items (the best, the worst, an outlier): use
+    color_discrete_map=jt.highlight(categories, "<focus>") so the focus is blue, the rest gray.
+    Don't color by group on these charts.
+  Comparing groups that matter across several charts (e.g. cuisine, region):
+    color_discrete_map=jt.color_map(<groups in a stable order>), the SAME call every time.
+  Comparing 2 measures (units vs revenue, big orders vs other orders):
+    color_discrete_map=jt.compare([...]); never reuse a group's color for a measure.
   Magnitude (heatmaps): color_continuous_scale=jt.SEQUENTIAL.
+- Horizontal bars are ranked by value automatically; keep ranking in mind for vertical bars.
+- KPI labels: 25 characters or fewer, e.g. "Orders" not "Orders with items recorded".
 - Chart rules: every chart gets a title stating its takeaway, axis titles with units
   (e.g. "Revenue ($)", "Orders per day"), sorted bars, no pie charts for close values,
   never two y-axes, at most 8 categories (fold the rest into "Other").

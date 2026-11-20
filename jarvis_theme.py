@@ -68,6 +68,17 @@ def color_map(categories) -> dict:
     return mapping
 
 
+def compare(names) -> dict:
+    """Colors for comparing 2 MEASURES (e.g. share of units vs share of revenue).
+
+    Uses neutrals, so measures never borrow a hue that means a category elsewhere
+    in the same report (if blue means "American" above, it can't mean "revenue" here).
+    """
+    names = list(dict.fromkeys(names))
+    shades = [INK_2, "#b5b3aa", MUTED, DIMMED]
+    return {n: shades[i % len(shades)] for i, n in enumerate(names)}
+
+
 def highlight(categories, focus) -> dict:
     """Emphasis colors: the focus category(s) in blue, everything else gray."""
     focus = {focus} if isinstance(focus, str) else set(focus)
@@ -202,12 +213,38 @@ def section(title: str, intro: str = "") -> None:
         st.markdown(f'<p class="jt-insight">{intro}</p>', unsafe_allow_html=True)
 
 
-def chart(fig, insight: str = "", table=None) -> None:
-    """Show a Plotly chart in the Jarvis style, with a one-line takeaway and a data table."""
+def _sort_horizontal_bars(fig) -> None:
+    """Rank horizontal bars by value (largest at top), even when they're colored by category.
+
+    Coloring by category makes Plotly group bars by color, which breaks the ranking.
+    Vertical bars are left alone, since they're often in time order.
+    """
+    try:
+        bars = [t for t in fig.data if getattr(t, "type", "") == "bar"]
+        if bars and all(getattr(t, "orientation", None) == "h" for t in bars):
+            fig.update_yaxes(categoryorder="total ascending")
+    except Exception:
+        pass
+
+
+def chart(fig, insight: str = "", table=None, sort: bool = True) -> None:
+    """Show a Plotly chart in the Jarvis style, with a one-line takeaway and a data table.
+
+    Horizontal bar charts are ranked by value automatically; pass sort=False to keep
+    your own order (e.g. funnel stages).
+    """
     import plotly.io as pio
     import streamlit as st
     import inspect
     fig.update_layout(template=pio.templates["jarvis"])
+    if sort:
+        _sort_horizontal_bars(fig)
+    try:  # enforce the look even if the chart code tried to override it
+        fig.update_layout(paper_bgcolor=SURFACE, plot_bgcolor=SURFACE)
+        fig.update_xaxes(gridcolor=GRID, zeroline=False)
+        fig.update_yaxes(gridcolor=GRID, zeroline=False)
+    except Exception:
+        pass
     # theme=None keeps Streamlit from repainting the chart with its own colors
     if "width" in inspect.signature(st.plotly_chart).parameters:
         st.plotly_chart(fig, theme=None, width="stretch")       # newer Streamlit
