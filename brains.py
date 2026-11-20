@@ -60,28 +60,55 @@ class MockBrain:
                 )
 
             stage = "after QA feedback" if "QA FEEDBACK" in user_message else "fixed code"
-            return (
-                f"## Analysis ({stage})\n\n"
-                "### Approach\nAggregate revenue by month, then compare growth by region "
-                "and category between the first and second year.\n\n"
-                "### Code\n```python\n"
-                "import pandas as pd\nimport plotly.express as px\n\n"
+            analysis = (
+                "# file: analysis.py\n"
+                "import os\nimport pandas as pd\n\n"
                 f"df = pd.read_csv('{data_file}', parse_dates=['date'])\n"
-                "df['year'] = df['date'].dt.year\n\n"
+                "df['year'] = df['date'].dt.year\n"
+                "os.makedirs('outputs/working', exist_ok=True)\n\n"
                 "monthly = df.groupby('date', as_index=False)['revenue'].sum()\n"
-                "fig = px.line(monthly, x='date', y='revenue', title='Monthly revenue',\n"
-                "              labels={'date': 'Month', 'revenue': 'Revenue (USD)'})\n"
-                "fig.write_html('monthly_revenue.html')\n\n"
+                "monthly.to_csv('outputs/working/monthly_revenue.csv', index=False)\n"
                 "by_month = df.groupby(df['date'].dt.month)['revenue'].mean()\n"
                 "print('Strongest month:', by_month.idxmax(), '| weakest month:', by_month.idxmin())\n\n"
-                "for col in ['region', 'product_category']:\n"
-                "    pivot = df.pivot_table(index=col, columns='year', values='revenue', aggfunc='sum')\n"
-                "    pivot['growth_%'] = (pivot.iloc[:, 1] / pivot.iloc[:, 0] - 1) * 100\n"
-                "    print(f'\\nYear-over-year growth by {col}:')\n"
-                "    print(pivot['growth_%'].round(1).sort_values(ascending=False).to_string())\n"
-                "```\n\n"
+                "pivot = df.pivot_table(index='region', columns='year', values='revenue', aggfunc='sum')\n"
+                "growth = ((pivot.iloc[:, 1] / pivot.iloc[:, 0] - 1) * 100).round(1)\n"
+                "growth = growth.rename('growth_pct').reset_index().sort_values('growth_pct', ascending=False)\n"
+                "growth.to_csv('outputs/working/region_growth.csv', index=False)\n"
+                "print('Total revenue:', round(df['revenue'].sum()))\n"
+                "print('Year-over-year growth by region (%):')\n"
+                "print(growth.to_string(index=False))\n"
+            )
+            app = (
+                "# file: app.py\n"
+                "import pandas as pd\nimport plotly.express as px\nimport jarvis_theme as jt\n\n"
+                "monthly = pd.read_csv('outputs/working/monthly_revenue.csv', parse_dates=['date'])\n"
+                "growth = pd.read_csv('outputs/working/region_growth.csv')\n\n"
+                "jt.page('Sales Review', 'Sample retailer, two years of monthly sales')\n"
+                "jt.kpis([('Total revenue', jt.money(monthly['revenue'].sum())),\n"
+                "         ('Months covered', jt.num(len(monthly))),\n"
+                "         ('Fastest-growing region', growth.iloc[0]['region'])])\n\n"
+                "jt.section('How has revenue trended?')\n"
+                "fig = px.line(monthly, x='date', y='revenue', title='Revenue peaks every December',\n"
+                "              labels={'date': 'Month', 'revenue': 'Revenue ($)'})\n"
+                "jt.chart(fig, 'Sales climb through the fall and peak in December.', table=monthly)\n\n"
+                "jt.section('Which regions are driving growth?')\n"
+                "fig = px.bar(growth, x='region', y='growth_pct', color='region',\n"
+                "             color_discrete_map=jt.highlight(growth['region'], growth.iloc[0]['region']),\n"
+                "             title=f\"{growth.iloc[0]['region']} grew fastest\",\n"
+                "             labels={'region': 'Region', 'growth_pct': 'Year-over-year growth (%)'})\n"
+                "fig.update_layout(showlegend=False)\n"
+                "jt.chart(fig, f\"{growth.iloc[0]['region']} grew {growth.iloc[0]['growth_pct']}% year over year.\", table=growth)\n\n"
+                "jt.bullets('Recommendations', ['Stock up ahead of the December peak.',\n"
+                "                               'Study what is working in the fastest-growing region.'])\n"
+                "jt.footer('Source: sample_sales.csv', ['Two years of data, so seasonality is tentative.'])\n"
+            )
+            return (
+                f"## Analysis ({stage})\n\n"
+                "### Approach\nAggregate revenue by month, compare regional growth, "
+                "and present it as a short report app.\n\n"
+                f"```python\n{analysis}```\n\n```python\n{app}```\n\n"
                 "### Findings\nSee the printed output: seasonality peaks late in the year, "
-                "and growth by region and category is ranked above.\n"
+                "and growth by region is ranked above.\n"
             )
 
         return "Mock brain: no canned answer for this agent."
@@ -128,7 +155,7 @@ class ClaudeBrain:
     from a Claude Pro subscription.
     """
 
-    def __init__(self, model: str = "claude-sonnet-5-5", max_tokens: int = 12000):
+    def __init__(self, model: str = "claude-sonnet-5-5", max_tokens: int = 16000):
         self.model = model
         self.max_tokens = max_tokens   # room for a full analysis script plus write-up
         self.last_truncated = False    # True if the last answer hit the length cap
@@ -154,7 +181,7 @@ class ClaudeBrain:
                 "anthropic-version": "2023-06-01",
             },
         )
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=900) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         self.last_truncated = body.get("stop_reason") == "max_tokens"
         return "".join(block.get("text", "") for block in body["content"])

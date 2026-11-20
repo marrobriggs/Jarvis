@@ -75,12 +75,15 @@ Results land in `runs/<timestamp>/`: each draft, each code run, each QA review, 
 - [x] Code execution with self-correction
 - [x] Connect the grader to the pipeline (accepted gigs become job folders)
 - [x] Claude API backend for fast grading and analysis
-- [x] Automatic data preview (columns, types, missing values) for every file
-- [x] Multi-file, folder and zip data support with safe unzipping
-- [x] Safety: secrets hidden from AI-written code, risky commands blocked,
+- [x] Automatic data preview for every file; folder and zip support
+- [x] Safety: secrets hidden from AI code, risky commands blocked,
       human approval for unfamiliar package installs
-- [ ] Polish round: apply QA's suggestions before final delivery
-- [ ] Reporter agent that packages approved work into a client-ready report
+- [x] Three deliverable types chosen from the brief: slide decks, Streamlit
+      report apps and data files, with multiple required deliverables combined
+- [x] One consistent, colorblind-safe theme across decks and report apps
+- [x] QA separates blocking issues from polish; polish round applies the rest
+- [x] Optional extras offered as follow-ups instead of built
+- [ ] Formatted Word/PDF report template
 - [ ] Retrieval (RAG) over past gigs and deliverables
 - [ ] Voice interface
 
