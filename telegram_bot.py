@@ -606,18 +606,55 @@ def section(markdown: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def plain(text: str) -> str:
+    """Strip Markdown so a client sees 'Trend: ...' and not '**Trend:** ...'."""
+    text = re.sub(r"\*\*|__|`", "", text)
+    text = re.sub(r"(?<!\w)\*(?!\s)([^*]+)\*(?!\w)", r"\1", text)    # *italics*
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)            # [link](url) -> link
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _bullets(markdown: str) -> list:
+    """Top-level points, with label-only bullets ('Categories:') merged into the point below."""
+    points = []
+    for line in markdown.splitlines():
+        if not line.strip().startswith(("-", "*", "•")) or line.strip().startswith("**") and not line.strip("* ").strip():
+            continue
+        text = plain(line.strip().lstrip("-*• "))
+        if not text:
+            continue
+        if points and points[-1].endswith(":"):
+            points[-1] = points[-1] + " " + text       # "Categories:" + "Computers lead with..."
+        else:
+            points.append(text)
+    return points
+
+
+def _shorten(text: str, limit: int = 240) -> str:
+    """Keep a highlight to a sentence or two, cut at a sentence boundary."""
+    if len(text) <= limit:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept = ""
+    for s_ in sentences:
+        if kept and len(kept) + len(s_) + 1 > limit:
+            break
+        kept = (kept + " " + s_).strip()
+    return kept if len(kept) <= limit + 80 else text[:limit].rsplit(" ", 1)[0] + "..."
+
+
 def client_message(writeup: str, files: list) -> str:
     """A short delivery message for the client, built from the approved write-up."""
     findings = section(writeup, "Findings")
     # Keep the first few points: bullets if there are any, otherwise the first sentences.
-    bullets = [l.strip().lstrip("-*• ").strip() for l in findings.splitlines() if l.strip().startswith(("-", "*", "•"))]
+    bullets = _bullets(findings)
     if bullets:
-        highlights = bullets[:4]
+        highlights = [_shorten(b) for b in bullets[:4]]
     else:
-        sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", findings))
+        sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", plain(findings)))
         highlights = [s for s in sentences if s][:3]
-    questions = [l.strip().lstrip("-*• ").strip() for l in section(writeup, "Questions for the client").splitlines() if l.strip()]
-    extras = [l.strip().lstrip("-*• ").strip() for l in section(writeup, "Optional next steps").splitlines() if l.strip()]
+    questions = [plain(l.strip().lstrip("-*• ")) for l in section(writeup, "Questions for the client").splitlines() if l.strip()]
+    extras = [plain(l.strip().lstrip("-*• ")) for l in section(writeup, "Optional next steps").splitlines() if l.strip()]
     deliverables = [f for f in files if not f.endswith(".zip")] or files
 
     parts = ["Hi! Your analysis is ready. I've attached " +
