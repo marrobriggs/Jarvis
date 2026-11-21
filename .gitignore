@@ -29,3 +29,6 @@ jobs/
 *.zip
 
 memory/
+
+telegram_state.json
+telegram_state.json.tmp

@@ -6,9 +6,16 @@ The agents and the orchestrator never care which brain is plugged in,
 so you can move from fake -> Ollama -> Claude API by changing one setting.
 """
 
+import http.client
 import json
 import os
+import time
+import urllib.error
 import urllib.request
+
+# Claude-side responses worth waiting out: rate limit, server errors, "overloaded".
+RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+RETRY_WAITS = [5, 15, 30, 60, 120]      # seconds between attempts (about 4 minutes in total)
 
 
 class MockBrain:
@@ -181,10 +188,43 @@ class ClaudeBrain:
                 "anthropic-version": "2023-06-01",
             },
         )
-        with urllib.request.urlopen(req, timeout=900) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        body = self._send(req)
         self.last_truncated = body.get("stop_reason") == "max_tokens"
         return "".join(block.get("text", "") for block in body["content"])
+
+    def _send(self, req) -> dict:
+        """Send the request, waiting out dropped connections and temporary Claude-side errors.
+
+        Problems that won't fix themselves (a bad key, no credit left) fail right away
+        with a clear message instead of retrying.
+        """
+        for attempt in range(len(RETRY_WAITS) + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=900) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                detail = _error_message(e)
+                if e.code not in RETRY_STATUS:
+                    raise RuntimeError(f"Claude API error {e.code}: {detail}") from e
+                problem = f"Claude is busy or erroring ({e.code}: {detail})"
+            except (urllib.error.URLError, http.client.HTTPException, ConnectionError,
+                    TimeoutError, OSError) as e:
+                problem = f"Connection to Claude dropped ({type(e).__name__}: {getattr(e, 'reason', e)})"
+            if attempt == len(RETRY_WAITS):
+                raise RuntimeError(f"Gave up after {attempt + 1} tries: {problem}")
+            wait = RETRY_WAITS[attempt]
+            print(f"           {problem}; retrying in {wait}s "
+                  f"(try {attempt + 2} of {len(RETRY_WAITS) + 1})...", flush=True)
+            time.sleep(wait)
+
+
+def _error_message(e) -> str:
+    """The human-readable part of an API error, e.g. 'Your credit balance is too low'."""
+    try:
+        body = json.loads(e.read().decode("utf-8"))
+        return body.get("error", {}).get("message", "") or str(body)[:200]
+    except Exception:
+        return str(e.reason)
 
 
 def get_brain(name: str):
