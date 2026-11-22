@@ -179,6 +179,69 @@ def enforce_ml(review, run):
     return review
 
 
+FINAL_RUN_NOTE = ("FINAL RUN ON ALL DATA: QA approved your work. Jarvis put the hidden rows back and "
+                  "reran your unchanged code, so the model is now trained on every row and every row is "
+                  "scored. Update every count and total to THIS output. Keep reporting the JARVIS HIDDEN "
+                  "TEST numbers as the model's expected accuracy on new data: they were measured before "
+                  "this retrain, on rows the model hadn't seen, so they are still the honest estimate.")
+
+
+def final_refit(brain, brain_name, brief, data_file, work, run, review, workdir, folder, holdout):
+    """ML jobs, after approval: retrain on ALL rows (hidden ones included) and score everyone.
+
+    The hidden test already did its job (an honest accuracy estimate). Holding those rows back
+    from the client's model and scores would only make the delivery worse. If anything goes
+    wrong, the approved version is kept.
+    """
+    snapshot = workdir + "_approved"
+    if os.path.exists(snapshot):
+        shutil.rmtree(snapshot)
+    shutil.copytree(workdir, snapshot)
+
+    def keep_approved(reason):
+        print(f"[Final] {reason} Keeping the approved version "
+              f"(trained on {holdout['train_rows']} of {holdout['full_rows']} rows).")
+        try:
+            shutil.rmtree(workdir)
+            shutil.copytree(snapshot, workdir)
+            shutil.rmtree(snapshot)
+        except OSError as e:
+            print(f"           Couldn't restore automatically ({e}). The approved version is in {snapshot}")
+        return work, run, review
+
+    print(f"[Final] Final step: retraining on all {holdout['full_rows']} rows and scoring everything...")
+    ml_check.restore_full(workdir, holdout)
+    final = run_job(work, workdir, timeout=CODE_TIMEOUT)
+    save(folder, "F_code_run.txt", describe_run(final))
+    if not final["ok"]:
+        return keep_approved("The final run on all rows failed.")
+    hidden = ml_check.report(run["ml"], holdout, run["stdout"])
+    final["stdout"] = (final["stdout"] + "\n\n" + hidden +
+                       "\n  (Measured BEFORE the final retrain on all rows.)").strip()
+    final["ml"] = run["ml"]
+
+    new_work = work
+    if brain_name != "mock":
+        print("           Analyst is updating the findings for the full data...")
+        findings = run_analyst(brain, brief, data_file, previous_work=work,
+                               code_output=FINAL_RUN_NOTE + "\n\n" + describe_run(final))
+        new_work = splice_findings(work, findings)
+        save(folder, "Fz_with_findings.md", new_work)
+        print("[Final] QA manager is checking the final version...")
+        new_review = run_qa(brain, brief, new_work, FINAL_RUN_NOTE + "\n\n" + describe_run(final),
+                            previous_review=review)
+        save(folder, "F_qa_review.json", json.dumps(new_review, indent=2))
+        if new_review["verdict"] != "APPROVE":
+            for point in new_review["feedback"]:
+                if point.upper().startswith("BLOCKING"):
+                    print(f"           - {point}")
+            return keep_approved("QA didn't approve the final version.")
+        review = new_review
+    shutil.rmtree(snapshot, ignore_errors=True)
+    print(f"[Final] Done: model retrained on all {holdout['full_rows']} rows, every row scored.")
+    return new_work, final, review
+
+
 def build(brain, brain_name, brief, data_file, work, workdir, folder, label, decisions, holdout=None):
     """Run the analyst's code, let it fix its own errors, then write findings from real output.
 
@@ -418,6 +481,9 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
                 if review is not approved_review:
                     reviews.append(review)
                 print()
+            if holdout:
+                work, run, review = final_refit(brain, brain_name, brief, data_file, work, run, review,
+                                                workdir, folder, holdout)
             save(folder, "FINAL_deliverable.md", work)
             note = " (polished)" if polished else ""
             print(f"Jarvis: approved in round {round_num}{note}. Final deliverable is in {folder}")

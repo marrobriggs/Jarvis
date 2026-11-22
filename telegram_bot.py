@@ -41,7 +41,15 @@ import uuid
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(HERE, "telegram_state.json")
+# The bot's state lives outside OneDrive (in %LOCALAPPDATA%\Jarvis), because OneDrive can lock
+# the file mid-sync and Windows then refuses the save ("PermissionError: Access is denied").
+STATE_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or HERE, "Jarvis")
+os.makedirs(STATE_DIR, exist_ok=True)
+STATE_FILE = os.path.join(STATE_DIR, "telegram_state.json")
+_OLD_STATE = os.path.join(HERE, "telegram_state.json")
+if not os.path.exists(STATE_FILE) and os.path.exists(_OLD_STATE) and _OLD_STATE != STATE_FILE:
+    import shutil
+    shutil.copy(_OLD_STATE, STATE_FILE)   # one-time move: keep the bot's memory of open jobs
 BRAIN = os.environ.get("JARVIS_BOT_BRAIN", "claude")   # "mock" for free test runs
 MAX_DOWNLOAD = 20 * 1024 * 1024                        # Telegram bots can download up to 20 MB
 MAX_UPLOAD = 50 * 1024 * 1024                          # ...and send up to 50 MB
@@ -159,10 +167,21 @@ class JarvisBot:
         return state
 
     def _save(self):
+        """Save state safely. If Windows (or a sync/antivirus program) briefly locks the file, retry."""
         tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=1)
-        os.replace(tmp, STATE_FILE)
+        for _ in range(10):
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.state, f, indent=1)
+                os.replace(tmp, STATE_FILE)
+                return
+            except PermissionError:
+                time.sleep(0.2)
+        try:   # last resort: write the file directly
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, indent=1)
+        except OSError as e:
+            print(f"Couldn't save bot state ({e}). Carrying on; it will try again next time.")
 
     def set(self, **changes):
         with self.lock:
@@ -586,7 +605,8 @@ def format_verdict(v: dict) -> str:
 def is_progress(line: str) -> bool:
     keys = ("Round", "Score", "approved", "Polish", "Code failed", "Code ran", "recalled", "not approved",
             "BLOCKED", "on the approved list). Installing", ": installed", "install failed",
-            "retrying in", "Gave up")
+            "retrying in", "Gave up",
+            "Hidden test", "hidden test set", "on '", "Warning:", "[Final]")   # ML jobs: Jarvis's own model test
     skip = ("NOT on the approved list", "Check it first", "Allow installing", "Approved. Installing", "Declined.")
     return (any(k in line for k in keys) and not any(k in line for k in skip)
             and not line.strip().startswith("-"))

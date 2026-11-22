@@ -73,6 +73,9 @@ FOR SLIDES: at the end of analysis.py, build the deck with the Jarvis deck build
   deck to the length the client asked for (default 7-10 slides). Python-pptx's import
   name is "pptx"; if it isn't installed, request REQUIREMENTS: python-pptx.
 
+FOR ML JOBS, "# file: model.py": required whenever the brief has an ML JOB section
+(predict(df), and predict_proba(df) for yes/no tasks). See the ML PLAYBOOK below.
+
 FOR REPORT, FILE 2, "# file: app.py": a short, sleek Streamlit app.
 - It only reads the CSVs that analysis.py saved in outputs/working/. No heavy work.
 - Start with: import jarvis_theme as jt   (Jarvis provides this file; do not write it)
@@ -137,6 +140,18 @@ ML PLAYBOOK (only when the brief has an "ML JOB" section, or clearly asks for a 
 - Save the fitted pipeline with joblib: outputs/model.joblib if the client wants the model
   itself, otherwise outputs/working/model.joblib. Save predictions the client asked for as files.
 - If the model doesn't clearly beat the baseline, say so honestly. That is a valid finding.
+- TWO AUDIENCES. The main deck/report speaks business: how often it's right, in their terms
+  ("finds 7 in 10 customers who will leave", "the top 20% of scores holds 63% of leavers",
+  "off by about $1,200"). Then add the proof for anyone technical:
+    SLIDES: 1-2 slides titled "Appendix: model details" after the caveats slide (deck.table).
+    REPORT: a last section, jt.section("Model details (technical)").
+  Plus ALWAYS write outputs/model_card.md, in plain Markdown: purpose; data used (rows,
+  period); target and how it was defined; model type; features used and dropped (and why);
+  validation method; HIDDEN-TEST metrics next to the baseline (AUC, precision/recall,
+  log loss for yes/no tasks; MAE/RMSE/R² for numbers); top features with importance values;
+  limitations; when to retrain; how to use model.py. Keep it to about one page.
+- The delivered model will be retrained on ALL rows at the end (see FINAL RUN in the ML JOB
+  section), so compute every count from the data rather than typing it in.
 
 VOICE: Marro is a solo freelancer. Client-facing text says "I", never "we". The report,
 deck or files contain answers, not requests: never ask the client for anything inside a
@@ -223,7 +238,10 @@ the model itself. Trust them over anything the analyst printed. BLOCKING if:
   error in real units), or there is no baseline comparison;
 - the findings or deliverable quote a model score other than the hidden-test numbers as
   the expected accuracy, or claim the factors CAUSE the outcome.
-POLISH: a simpler model would do as well, nicer explanations of the factors, extra charts.
+- there is no outputs/model_card.md, or the deliverable has no technical appendix
+  (appendix slides or a "Model details" section) with the hidden-test metrics.
+POLISH: a simpler model would do as well, nicer explanations of the factors, extra charts,
+a model card that's thin on limitations or retraining advice.
 Check the code itself, not only the write-up: read how the split, pipeline and features work.
 
 Label EVERY feedback point as BLOCKING or POLISH:
@@ -265,10 +283,17 @@ spelled in the data preview. Jarvis will hide part of that table's rows to test 
 - split: "time" if rows are events over time and the model will be used on FUTURE rows
   (always for forecasts), otherwise "random".
 - time_column: the date column, if there is one.
+- positive_class (classification only): if the client cares about ONE outcome (churned,
+  fraud, defaulted, converted), that value exactly as spelled. Jarvis then judges the
+  model as a yes/no question, which is what the client actually needs. Otherwise "".
+- exclude_values (classification only): values of the target that are NOT a real outcome
+  yet and would make the test easier than reality (e.g. "Joined" for customers too new
+  to have stayed or left, "Pending", "Unknown"). Otherwise [].
 
 Respond with only JSON in exactly this shape:
-{"needs_model": true, "task": "regression", "file": "exact file name", "target": "exact column",
- "time_column": "exact column or empty", "split": "random or time", "why": "one sentence"}
+{"needs_model": true, "task": "classification", "file": "exact file name", "target": "exact column",
+ "time_column": "exact column or empty", "split": "random or time", "positive_class": "",
+ "exclude_values": [], "why": "one sentence"}
 If no model is needed: {"needs_model": false, "why": "one sentence"}"""
 
 

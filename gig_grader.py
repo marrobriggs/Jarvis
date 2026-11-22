@@ -255,8 +255,11 @@ def save_job(listing: str, verdict: dict) -> str:
     """Save an accepted gig as jobs/<date>_<title>/brief.txt and return the folder."""
     title = verdict.get("title", "gig")
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "gig"
-    folder = os.path.join("jobs", f"{datetime.now():%Y-%m-%d}_{slug}")
-    os.makedirs(folder, exist_ok=True)
+    base = os.path.join("jobs", f"{datetime.now():%Y-%m-%d}_{slug}")
+    folder, n = base, 2
+    while os.path.exists(folder):          # never reuse a folder: old files would mix in
+        folder, n = f"{base}-{n}", n + 1
+    os.makedirs(folder)
     with open(os.path.join(folder, "brief.txt"), "w", encoding="utf-8") as f:
         f.write(f"Gig: {title}\n")
         f.write(f"Core deliverable: {verdict.get('core_deliverable', '')}\n")

@@ -31,7 +31,8 @@ TASKS = ("regression", "classification", "forecast")
 READABLE = (".csv", ".tsv", ".txt", ".xlsx", ".xls", ".parquet")
 
 # Higher-is-better metrics; the rest (mae, rmse, mape) are lower-is-better.
-HIGHER_IS_BETTER = {"r2", "accuracy", "balanced_accuracy", "macro_f1"}
+HIGHER_IS_BETTER = {"r2", "accuracy", "balanced_accuracy", "macro_f1", "auc",
+                    "positive_recall", "positive_precision"}
 MAIN_METRIC = {"regression": "mae", "forecast": "mae", "classification": "balanced_accuracy"}
 
 
@@ -93,47 +94,70 @@ def validate_plan(plan: dict, workdir: str, files: list) -> tuple:
     split = "time" if (task == "forecast" or plan.get("split") == "time") and time_col else "random"
     if task == "forecast" and not time_col:
         return None, "a forecast needs a date column to split on, and none was found"
+    exclude, positive = [], ""
+    if task == "classification":
+        values = set(df[target].dropna().astype(str))
+        exclude = [str(v) for v in (plan.get("exclude_values") or []) if str(v) in values]
+        positive = str(plan.get("positive_class") or "").strip()
+        if positive and positive not in values:
+            positive = ""
+        if len(values - set(exclude)) < 2:
+            return None, "fewer than 2 outcomes are left to predict after the exclusions"
+        if positive in exclude:
+            positive = ""
     clean = {"needs_model": True, "task": task, "file": name, "target": target,
-             "time_column": time_col, "split": split, "why": str(plan.get("why", ""))[:300]}
+             "time_column": time_col, "split": split, "exclude_values": exclude,
+             "positive_class": positive, "why": str(plan.get("why", ""))[:300]}
     return clean, ""
 
 
-def hold_out(workdir: str, plan: dict, seed: int = 42) -> dict:
-    """Hide TEST_SHARE of the rows. The work folder keeps only the training rows.
+def _labels(y, plan: dict) -> pd.Series:
+    """The outcome as Jarvis scores it: yes/no for one outcome the client cares about, else as is."""
+    y = pd.Series(y).reset_index(drop=True).astype(str)
+    pos = plan.get("positive_class")
+    return y.where(y == pos, f"not {pos}") if pos else y
 
-    Returns a holdout dict (kept in memory by the orchestrator), or {"skipped": reason}.
+
+def hold_out(workdir: str, plan: dict, seed: int = 42) -> dict:
+    """Hide TEST_SHARE of the labeled rows. The work folder keeps everything else.
+
+    Rows with no known outcome (e.g. customers to score) and excluded outcomes stay with
+    the analyst. Returns a holdout dict (kept in memory by the orchestrator), or {"skipped": reason}.
     """
     path = os.path.join(workdir, plan["file"])
-    df = _read(path)
-    df = df[df[plan["target"]].notna()].reset_index(drop=True)
-    if len(df) < MIN_ROWS:
-        return {"skipped": f"only {len(df)} rows with a known {plan['target']}, too few for a fair hidden test"}
+    full = _read(path)
+    target = full[plan["target"]]
+    eligible = target.notna() & ~target.astype(str).isin(plan.get("exclude_values") or [])
+    pool = full[eligible]
+    if len(pool) < MIN_ROWS:
+        return {"skipped": f"only {len(pool)} rows with a known {plan['target']}, too few for a fair hidden test"}
 
-    n_test = max(MIN_TEST_ROWS, int(round(len(df) * TEST_SHARE)))
+    n_test = max(MIN_TEST_ROWS, int(round(len(pool) * TEST_SHARE)))
     if plan["split"] == "time":
-        times = pd.to_datetime(df[plan["time_column"]], errors="coerce")
+        times = pd.to_datetime(pool[plan["time_column"]], errors="coerce")
         if times.isna().mean() > 0.2:
             return {"skipped": f"couldn't read the dates in {plan['time_column']}"}
         order = times.sort_values(kind="stable").index
-        cutoff = times.loc[order[len(df) - n_test]]
+        cutoff = times.loc[order[len(pool) - n_test]]
         test_idx = times.index[times >= cutoff]          # whole periods, never split a day in two
         split_note = f"the most recent rows (from {cutoff.date()} on)"
     elif plan["task"] == "classification":
         rng = np.random.default_rng(seed)
         test_idx = []
-        for _, group in df.groupby(plan["target"]):      # stratified: keep class shares the same
-            k = int(round(len(group) * n_test / len(df)))
+        for _, group in pool.groupby(plan["target"]):    # stratified: keep class shares the same
+            k = int(round(len(group) * n_test / len(pool)))
             test_idx.extend(rng.choice(group.index, size=min(k, len(group) - 1), replace=False)
                             if len(group) > 1 else [])
         test_idx = pd.Index(sorted(test_idx))
-        split_note = "a random sample, with the same mix of classes"
+        split_note = "a random sample, with the same mix of outcomes"
     else:
-        test_idx = df.sample(n=n_test, random_state=seed).index
+        test_idx = pool.sample(n=n_test, random_state=seed).index
         split_note = "a random sample"
 
-    test = df.loc[test_idx].reset_index(drop=True)
-    train = df.drop(index=test_idx).reset_index(drop=True)
-    if len(test) < MIN_TEST_ROWS or len(train) < MIN_TEST_ROWS:
+    test = full.loc[test_idx].reset_index(drop=True)
+    train = full.drop(index=test_idx).reset_index(drop=True)
+    train_pool = pool.drop(index=test_idx)
+    if len(test) < MIN_TEST_ROWS or len(train_pool) < MIN_TEST_ROWS:
         return {"skipped": "the split left too few rows on one side"}
 
     new_path = _write(train, path)
@@ -141,21 +165,38 @@ def hold_out(workdir: str, plan: dict, seed: int = 42) -> dict:
     holdout = {
         "plan": dict(plan, file=new_name),
         "original_file": plan["file"],
+        "full": full,                     # put back after approval, for the final retrain
         "features": test.drop(columns=[plan["target"]]),
-        "answers": test[plan["target"]].reset_index(drop=True),
-        "train_rows": len(train), "test_rows": len(test), "split_note": split_note,
+        "answers": _labels(test[plan["target"]], plan) if plan["task"] == "classification"
+                   else test[plan["target"]].reset_index(drop=True),
+        "train_rows": len(train), "test_rows": len(test), "full_rows": len(full),
+        "split_note": split_note,
     }
-    holdout["baseline"] = baseline_scores(train, test, plan)
+    holdout["baseline"] = baseline_scores(train_pool, test, plan)
     return holdout
+
+
+def restore_full(workdir: str, holdout: dict) -> None:
+    """Put the hidden rows back, so the final run retrains on (and scores) everything."""
+    path = os.path.join(workdir, holdout["plan"]["file"])
+    if path.lower().endswith(".parquet"):
+        holdout["full"].to_parquet(path, index=False)
+    else:
+        holdout["full"].to_csv(path, index=False)
 
 
 def baseline_scores(train: pd.DataFrame, test: pd.DataFrame, plan: dict) -> dict:
     """The dumbest reasonable model. A real model has to beat it to be worth anything."""
     y_test = test[plan["target"]]
     if plan["task"] == "classification":
-        common = train[plan["target"]].mode().iloc[0]
+        y_train = _labels(train[plan["target"]], plan)
+        common = y_train.mode().iloc[0]
         guess = pd.Series([common] * len(test))
-        return {"name": f"always guess the most common class ({common})", **metrics(y_test, guess, "classification")}
+        probs = None
+        if plan.get("positive_class"):   # a constant probability: the base rate
+            probs = pd.Series([(y_train == plan["positive_class"]).mean()] * len(test))
+        return {"name": f"always guess the most common outcome ({common})",
+                **metrics(_labels(y_test, plan), guess, "classification", plan.get("positive_class"), probs)}
     y_train = pd.to_numeric(train[plan["target"]], errors="coerce")
     if plan["task"] == "forecast":
         times = pd.to_datetime(train[plan["time_column"]], errors="coerce")
@@ -171,11 +212,31 @@ def baseline_scores(train: pd.DataFrame, test: pd.DataFrame, plan: dict) -> dict
 # Metrics (plain numpy, so Jarvis doesn't depend on scikit-learn)
 # ---------------------------------------------------------------------------
 
-def metrics(y_true, y_pred, task: str) -> dict:
+def _auc(yes, probs) -> float:
+    """Area under the ROC curve: the chance a random 'yes' row scores higher than a random 'no' row."""
+    ranks = pd.Series(probs).rank(method="average").to_numpy()
+    yes = np.asarray(yes, bool)
+    n_yes, n_no = yes.sum(), (~yes).sum()
+    if not n_yes or not n_no:
+        return float("nan")
+    return float((ranks[yes].sum() - n_yes * (n_yes + 1) / 2) / (n_yes * n_no))
+
+
+def metrics(y_true, y_pred, task: str, positive: str = "", probs=None) -> dict:
     y_true = pd.Series(y_true).reset_index(drop=True)
     y_pred = pd.Series(y_pred).reset_index(drop=True)
     if task == "classification":
         t, p = y_true.astype(str), y_pred.astype(str)
+        extra = {}
+        if positive:
+            tp = ((t == positive) & (p == positive)).sum()
+            extra["positive_recall"] = float(tp / max((t == positive).sum(), 1))
+            extra["positive_precision"] = float(tp / max((p == positive).sum(), 1))
+            if probs is not None:
+                pr = pd.to_numeric(pd.Series(probs).reset_index(drop=True), errors="coerce").clip(1e-6, 1 - 1e-6)
+                yes = (t == positive).to_numpy()
+                extra["auc"] = _auc(yes, pr.to_numpy())
+                extra["log_loss"] = float(-np.mean(np.where(yes, np.log(pr), np.log(1 - pr))))
         classes = sorted(set(t))
         recalls, f1s = [], []
         for c in classes:
@@ -187,7 +248,7 @@ def metrics(y_true, y_pred, task: str) -> dict:
             recalls.append(recall)
             f1s.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
         return {"accuracy": float((t == p).mean()), "balanced_accuracy": float(np.mean(recalls)),
-                "macro_f1": float(np.mean(f1s))}
+                "macro_f1": float(np.mean(f1s)), **extra}
     t = pd.to_numeric(y_true, errors="coerce").to_numpy(float)
     p = pd.to_numeric(y_pred, errors="coerce").to_numpy(float)
     ok = ~(np.isnan(t) | np.isnan(p))
@@ -221,7 +282,13 @@ try:
     X = pd.read_pickle("_jarvis_hidden_features.pkl")
     preds = model.predict(X.copy())
     preds = pd.Series(list(preds) if not isinstance(preds, pd.Series) else preds.tolist())
-    preds.to_frame("prediction").to_pickle("_jarvis_predictions.pkl")
+    out = preds.to_frame("prediction")
+    if hasattr(model, "predict_proba"):
+        try:
+            out["probability"] = [float(v) for v in model.predict_proba(X.copy())]
+        except Exception:
+            pass
+    out.to_pickle("_jarvis_predictions.pkl")
     print(json.dumps({"ok": True, "n": len(preds)}))
 except Exception:
     print(json.dumps({"ok": False, "error": traceback.format_exc()[-3000:]}))
@@ -244,7 +311,9 @@ def score_model(workdir: str, holdout: dict, timeout: int = 300) -> dict:
         info = json.loads(lines[-1]) if lines else {"ok": False, "error": result.stderr[-3000:] or "no output"}
         if not info.get("ok"):
             return {"ok": False, "error": "model.py predict(df) failed on the hidden rows:\n" + info["error"]}
-        preds = pd.read_pickle(preds_path)["prediction"]
+        frame = pd.read_pickle(preds_path)
+        preds = frame["prediction"]
+        probs = frame["probability"] if "probability" in frame else None
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"model.py predict(df) took longer than {timeout} seconds."}
     finally:
@@ -258,7 +327,14 @@ def score_model(workdir: str, holdout: dict, timeout: int = 300) -> dict:
     task = holdout["plan"]["task"]
     if task != "classification" and pd.to_numeric(preds, errors="coerce").isna().mean() > 0.05:
         return {"ok": False, "error": "predict(df) returned values that aren't numbers."}
-    scores = metrics(holdout["answers"], preds, task)
+    plan = holdout["plan"]
+    if task == "classification":
+        preds = _labels(preds, plan)
+        if probs is not None and (len(probs) != len(preds) or probs.isna().any()):
+            probs = None
+        scores = metrics(holdout["answers"], preds, task, plan.get("positive_class"), probs)
+    else:
+        scores = metrics(holdout["answers"], preds, task)
     main = MAIN_METRIC[task]
     gain = _better(main, scores[main], holdout["baseline"][main])
     return {"ok": True, "scores": scores, "main_metric": main, "gain_vs_baseline": gain,
@@ -270,6 +346,8 @@ def _warnings(scores: dict, holdout: dict, task: str) -> list:
     if task == "classification" and scores["accuracy"] >= 0.99:
         warnings.append("Near-perfect accuracy on unseen rows. Check for leakage: a column that "
                         "gives away the answer (an ID, a status set after the fact, the target in disguise).")
+    if scores.get("auc", 0) >= 0.99:
+        warnings.append("AUC of 0.99+ on unseen rows. Check for leakage: a column that gives away the answer.")
     if task != "classification" and scores["r2"] >= 0.98:
         warnings.append("R² of 0.98+ on unseen rows. Check for leakage: a column that is the target "
                         "in disguise, or information from after the moment of prediction.")
@@ -279,7 +357,7 @@ def _warnings(scores: dict, holdout: dict, task: str) -> list:
 _VALIDATION = re.compile(r"VALIDATION SCORE:\s*([A-Za-z_² ]+?)\s*=\s*(-?[\d.]+)", re.IGNORECASE)
 _ALIASES = {"r²": "r2", "r2": "r2", "r_squared": "r2", "mae": "mae", "rmse": "rmse", "mape": "mape",
             "accuracy": "accuracy", "balanced_accuracy": "balanced_accuracy", "macro_f1": "macro_f1",
-            "f1": "macro_f1", "f1_macro": "macro_f1"}
+            "f1": "macro_f1", "f1_macro": "macro_f1", "auc": "auc", "roc_auc": "auc"}
 
 
 def validation_gap(stdout: str, result: dict) -> str:
@@ -313,9 +391,9 @@ def validation_gap(stdout: str, result: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _fmt(metric: str, value: float) -> str:
-    if metric in ("accuracy", "balanced_accuracy", "macro_f1", "mape"):
+    if metric in ("accuracy", "balanced_accuracy", "macro_f1", "mape", "positive_recall", "positive_precision"):
         return f"{value * 100:.1f}%"
-    if metric == "r2":
+    if metric in ("r2", "auc", "log_loss"):
         return f"{value:.3f}"
     return f"{value:,.3f}" if abs(value) < 100 else f"{value:,.0f}"
 
@@ -323,22 +401,45 @@ def _fmt(metric: str, value: float) -> str:
 def brief_section(holdout: dict) -> str:
     """What the analyst is told about the ML job (never the hidden rows themselves)."""
     p = holdout["plan"]
+    main = MAIN_METRIC[p["task"]]
     cols = ", ".join(map(str, holdout["features"].columns[:40]))
     renamed = (f" (it was converted from {holdout['original_file']})"
                if holdout["original_file"] != p["file"] else "")
-    return f"""ML JOB (set up by Jarvis):
-- Task: {p['task']}. Target column: '{p['target']}' in {p['file']}{renamed}.
-- Jarvis has HIDDEN {holdout['test_rows']} rows ({holdout['split_note']}) to test your model
-  independently. You have {holdout['train_rows']} rows. Do your own validation inside them.
-- You MUST write "# file: model.py" with a function predict(df) that takes a DataFrame with
-  exactly these columns: {cols}
-  (the same layout as {p['file']} without '{p['target']}'), and returns one prediction per row,
-  in the same order. It must load the model your analysis.py saved (e.g. with joblib), using a path
-  built from os.path.dirname(os.path.abspath(__file__)), and do the same preprocessing. It must not
-  read the training data or retrain.
-- Print your own validation result in this exact form: VALIDATION SCORE: {MAIN_METRIC[p['task']]} = <number>
-- Jarvis's baseline on the hidden rows ({holdout['baseline']['name']}):
-  {MAIN_METRIC[p['task']]} = {_fmt(MAIN_METRIC[p['task']], holdout['baseline'][MAIN_METRIC[p['task']]])}. Your model has to beat it clearly."""
+    lines = [
+        "ML JOB (set up by Jarvis):",
+        f"- Task: {p['task']}. Target column: '{p['target']}' in {p['file']}{renamed}.",
+    ]
+    if p.get("positive_class"):
+        lines.append(f"- Jarvis scores this as a yes/no question: is it '{p['positive_class']}' or not? "
+                     f"Your model may predict the original values; anything other than "
+                     f"'{p['positive_class']}' counts as 'no'.")
+    if p.get("exclude_values"):
+        lines.append(f"- Rows where '{p['target']}' is {', '.join(repr(v) for v in p['exclude_values'])} "
+                     "are not real outcomes yet, so Jarvis never tests on them. Decide whether to train on "
+                     "them, and explain your choice.")
+    lines += [
+        f"- Jarvis has HIDDEN {holdout['test_rows']} rows ({holdout['split_note']}) to test your model",
+        f"  independently. You have {holdout['train_rows']} rows. Do your own validation inside them.",
+        "- You MUST write \"# file: model.py\" with a function predict(df) that takes a DataFrame with",
+        f"  exactly these columns: {cols}",
+        f"  (the same layout as {p['file']} without '{p['target']}'), and returns one prediction per row,",
+        "  in the same order. It must load the model your analysis.py saved (e.g. with joblib), using a",
+        "  path built from os.path.dirname(os.path.abspath(__file__)), and do the same preprocessing.",
+        "  It must not read the training data or retrain.",
+    ]
+    if p.get("positive_class"):
+        lines.append(f"- Also define predict_proba(df) in model.py, returning the probability of "
+                     f"'{p['positive_class']}' for each row (one number per row), so Jarvis can measure AUC.")
+    lines += [
+        f"- Print your own validation result in this exact form: VALIDATION SCORE: {main} = <number>",
+        f"- Jarvis's baseline on the hidden rows ({holdout['baseline']['name']}):",
+        f"  {main} = {_fmt(main, holdout['baseline'][main])}. Your model has to beat it clearly.",
+        f"- FINAL RUN: once QA approves, Jarvis puts the hidden rows back ({holdout['full_rows']} rows in all)",
+        "  and reruns your analysis.py once, so the delivered model is trained on all the data and every",
+        "  row gets scored. So compute every count and total from the data; never hard-code row counts.",
+        "  (Hidden-test numbers you've been shown may be hard-coded: they don't change.)",
+    ]
+    return "\n".join(lines)
 
 
 def report(result: dict, holdout: dict, stdout: str = "") -> str:
@@ -351,7 +452,10 @@ def report(result: dict, holdout: dict, stdout: str = "") -> str:
         lines.append("FAILED: " + result.get("error", "unknown error"))
         return "\n".join(lines)
     for metric, value in result["scores"].items():
-        lines.append(f"  {metric}: model {_fmt(metric, value)} | baseline {_fmt(metric, base[metric])}")
+        shown = f" | baseline {_fmt(metric, base[metric])}" if metric in base else ""
+        lines.append(f"  {metric}: model {_fmt(metric, value)}{shown}")
+    if p.get("positive_class") and "auc" not in result["scores"]:
+        lines.append("  (No AUC: model.py has no predict_proba(df), so only yes/no predictions were scored.)")
     main = result["main_metric"]
     verdict = "BEATS" if result["beats_baseline"] else "DOES NOT BEAT"
     lines.append(f"  Main metric ({main}): the model {verdict} the baseline "
