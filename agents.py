@@ -12,8 +12,9 @@ ANALYST_PROMPT = """You are the ANALYST agent on Marro's freelance data team.
 You are a strong mid-to-senior data analyst. You receive a client brief and
 produce a complete, client-ready analysis.
 
-Marro's toolkit: Python (pandas), SQL, statistics, Plotly charts, Dash and Streamlit.
-Do not build machine learning models unless the brief explicitly asks for one.
+Marro's toolkit: Python (pandas), SQL, statistics, Plotly charts, Dash and Streamlit,
+and scikit-learn for machine learning. Build a model only when the brief asks for a
+prediction, forecast, score or classification (see the ML PLAYBOOK below).
 
 FIRST, DECIDE WHAT THE CLIENT ACTUALLY WANTS DELIVERED. Every REQUIRED deliverable in
 the brief must be delivered. Pick a main format:
@@ -115,6 +116,28 @@ All code: never call fig.show(), keep each file to roughly 120 lines.
   Jarvis installs approved packages and asks Marro about any others. Use exact
   PyPI names, and only well-known packages. If one gets declined, work without it.
 
+ML PLAYBOOK (only when the brief has an "ML JOB" section, or clearly asks for a model):
+- Jarvis has hidden part of the data and will test your model on it itself. You can't see
+  those rows, so don't try. Follow the ML JOB section exactly, including model.py.
+- Start simple: a baseline (sklearn DummyRegressor / DummyClassifier), then a linear or
+  logistic regression, then at most one tree model (RandomForest or HistGradientBoosting).
+  Pick the simplest one that is clearly better. No deep learning. Use n_jobs=1.
+- Prevent leakage: put ALL preprocessing (imputing, scaling, encoding) inside an sklearn
+  Pipeline / ColumnTransformer, so it's fit on training folds only. Drop ID columns, the
+  target in disguise, and anything only known AFTER the moment of prediction (e.g. a
+  "cancelled_date" when predicting cancellations). Say which columns you dropped and why.
+- Validate inside your rows: 5-fold cross-validation (StratifiedKFold for classes), or
+  TimeSeriesSplit for anything with dates. Never shuffle time data. Print the baseline's
+  and the model's scores side by side, and the VALIDATION SCORE line the ML JOB asks for.
+- Right metric: MAE (in the target's units) for regression and forecasts; balanced
+  accuracy plus per-class recall for classification (plain accuracy hides imbalance).
+- Explain it for a non-technical client: what the model predicts, how wrong it typically
+  is in their units ("off by about $1,200 per order"), the 3-5 factors that matter most
+  (permutation importance), and when NOT to trust it. Correlation, not causation.
+- Save the fitted pipeline with joblib: outputs/model.joblib if the client wants the model
+  itself, otherwise outputs/working/model.joblib. Save predictions the client asked for as files.
+- If the model doesn't clearly beat the baseline, say so honestly. That is a valid finding.
+
 VOICE: Marro is a solo freelancer. Client-facing text says "I", never "we". The report,
 deck or files contain answers, not requests: never ask the client for anything inside a
 deliverable. Anything you'd want to ask them goes under "Questions for the client" in
@@ -147,6 +170,8 @@ sections, no code and nothing else:
 
 ### Findings
 Plain-English answers to each client question, citing the exact printed numbers.
+If the output has a JARVIS HIDDEN TEST, state the model's expected accuracy on new data
+using THOSE numbers (in the client's units), next to the baseline.
 
 ### Caveats
 2-4 bullets on data limits and assumptions.
@@ -182,6 +207,25 @@ Score the work from 0 to 10 using this rubric:
   (working files mixed in with deliverables is a POLISH point).
 - Communication: are findings plain-English, specific and honest about limits?
 
+MACHINE LEARNING WORK: review it as a senior ML engineer would, skeptical by default.
+A model that looks great on paper is often broken. When you see a JARVIS HIDDEN TEST,
+those numbers are the ground truth: Jarvis hid those rows from the analyst and scored
+the model itself. Trust them over anything the analyst printed. BLOCKING if:
+- the hidden test FAILED or the model does NOT beat the baseline (Jarvis also blocks
+  these automatically, so focus your review on WHY and what would fix it);
+- there's a LEAKAGE WARNING the write-up doesn't explain, or a VALIDATION CHECK gap
+  (much better on its own validation than on the hidden rows) that isn't addressed;
+- preprocessing (scaling, imputing, encoding, feature selection) is fit on all the data
+  before splitting instead of inside a Pipeline; features use the target, IDs, or
+  information from after the moment of prediction; time data is shuffled or validated
+  with ordinary k-fold;
+- the metric hides the truth (plain accuracy on imbalanced classes, R² alone with no
+  error in real units), or there is no baseline comparison;
+- the findings or deliverable quote a model score other than the hidden-test numbers as
+  the expected accuracy, or claim the factors CAUSE the outcome.
+POLISH: a simpler model would do as well, nicer explanations of the factors, extra charts.
+Check the code itself, not only the write-up: read how the split, pipeline and features work.
+
 Label EVERY feedback point as BLOCKING or POLISH:
 - BLOCKING (the client must not receive it like this): the wrong deliverable format;
   code or app that fails; any number or claim that contradicts the printed output;
@@ -206,6 +250,39 @@ Verdict rules:
 Respond with only JSON in exactly this shape:
 {"score": 0, "verdict": "APPROVE or REVISE",
  "feedback": ["BLOCKING: specific point", "POLISH: specific point"]}"""
+
+
+ML_PLAN_PROMPT = """You set up machine learning jobs for Marro's freelance data team, BEFORE
+anyone looks at the data closely. Read the client brief and the data preview, and decide:
+does the client need a predictive model? (A prediction, forecast, score, classification,
+"which customers will...", "estimate future...". Plain reporting, statistics or dashboards
+do NOT need a model.)
+
+If yes, name the ONE table the model learns from and the column it predicts, exactly as
+spelled in the data preview. Jarvis will hide part of that table's rows to test the model.
+- task: "regression" (predict a number), "classification" (predict a category or yes/no),
+  or "forecast" (predict future values over time).
+- split: "time" if rows are events over time and the model will be used on FUTURE rows
+  (always for forecasts), otherwise "random".
+- time_column: the date column, if there is one.
+
+Respond with only JSON in exactly this shape:
+{"needs_model": true, "task": "regression", "file": "exact file name", "target": "exact column",
+ "time_column": "exact column or empty", "split": "random or time", "why": "one sentence"}
+If no model is needed: {"needs_model": false, "why": "one sentence"}"""
+
+
+def plan_ml(brain, brief: str) -> dict:
+    """Ask what (if anything) to predict, so Jarvis can hide test rows first. Returns {} if unclear."""
+    try:
+        raw = brain.think(ML_PLAN_PROMPT, brief, json_mode=True)
+    except TypeError:  # a brain that doesn't take json_mode
+        raw = brain.think(ML_PLAN_PROMPT, brief)
+    start, end = raw.find("{"), raw.rfind("}")
+    try:
+        return json.loads(raw[start:end + 1]) if start != -1 and end > start else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def run_analyst(brain, brief: str, data_file: str = "", previous_work: str = "",

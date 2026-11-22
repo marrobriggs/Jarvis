@@ -47,20 +47,30 @@ Strong (can deliver confidently):
 - SQL-based data cleaning and data engineering
 - Written reports summarizing findings and visuals
 
+Supported, still learning (Jarvis builds these with scikit-learn and checks them on
+hidden test data, but Marro is newer to ML and has to explain the model to the client):
+- Classic machine learning on tables: regression (predict a number), classification
+  (predict a category, e.g. churn), time-series forecasting, feature importance
+  (random forest, gradient boosting, logistic/linear regression, XGBoost/LightGBM)
+
 Avoid:
-- Machine learning or predictive modeling as the main deliverable
-  (classification, regression models, random forest, XGBoost, forecasting models,
-  deep learning, NLP models, computer vision)
+- Deep learning, computer vision, speech, training NLP or language models
+- Building LLM apps, chatbots or AI agents, or extracting data from documents with AI
+- Production MLOps: deploying models as APIs, real-time systems, cloud ML pipelines
 - R Shiny dashboards
 
 GRADING RULES
 
 1. Identify the core deliverable of the job.
 2. Set involves_ml:
-   - "core" if the main work is building ML, predictive models, NLP, document or
-     data extraction with AI, LLM or AI-agent development, or computer vision
+   - "core" if the main work is building a model of any kind
    - "minor" if a simple model is a small, optional add-on to analysis or dashboards
    - "none" otherwise
+   Then set ml_kind (use "none" when involves_ml is "none"):
+   - "tabular": regression, classification, clustering or feature importance on tables
+   - "forecasting": predicting future values of a time series
+   - "advanced": anything in the Avoid list (deep learning, vision, NLP/LLM models,
+     AI agents, AI document extraction, deploying models to production)
 3. Pros and cons must not contradict each other or the gaps. A skill Marro lacks
    is a gap or a con, never a pro.
 4. Score fit from 0 to 10:
@@ -68,6 +78,7 @@ GRADING RULES
    - 6-8: mostly strong skills, some unknowns or minor gaps
    - 3-5: significant gaps or vague scope
    - 0-2: mostly outside skills or in the avoid list
+   - Core tabular or forecasting ML jobs score at most 8, since Marro is still learning ML.
 5. Note red flags: vague scope, unrealistic budget or deadline, requests for
    unpaid test work, asking to communicate or pay off-platform.
 6. Be honest. Do not inflate scores to be encouraging.
@@ -84,6 +95,7 @@ Respond with only valid JSON in exactly this shape:
   "matched_skills": ["skills from Marro's profile this job uses"],
   "gaps": ["skills the job needs that Marro lacks or avoids"],
   "involves_ml": "none | minor | core",
+  "ml_kind": "none | tabular | forecasting | advanced",
   "fit_score": 0,
   "pros": ["reasons to take it"],
   "cons": ["reasons to skip it"],
@@ -139,6 +151,7 @@ def mock_grade(listing: str) -> dict:
         "matched_skills": ["Python", "pandas", "Plotly", "Dash/Streamlit"],
         "gaps": [],
         "involves_ml": "none",
+        "ml_kind": "none",
         "fit_score": 8,
         "pros": ["Mock pro: matches core skills"],
         "cons": ["Mock con: this grade is fake"],
@@ -149,6 +162,9 @@ def mock_grade(listing: str) -> dict:
 
 def enforce_ml_rule(verdict: dict) -> dict:
     """Decide the recommendation in code, not in the model.
+
+    Classic ML (tabular, forecasting) is graded like any other job, capped at 8/10.
+    Advanced ML as the core of the job (deep learning, LLM apps, production MLOps) is a PASS.
 
     The model only reports facts (score, ML level, red flags). These rules
     turn those facts into TAKE / MAYBE / PASS, so the result can never
@@ -161,10 +177,20 @@ def enforce_ml_rule(verdict: dict) -> dict:
     verdict["fit_score"] = score
 
     ml = str(verdict.get("involves_ml", "none")).strip().lower()
+    kind = str(verdict.get("ml_kind", "none")).strip().lower()
+    if ml == "none":
+        kind = "none"
+    elif kind not in ("tabular", "forecasting", "advanced"):
+        kind = "tabular"   # an ML job the model didn't label: treat it as the standard kind
+    verdict["ml_kind"] = kind
     red_flags = [f for f in (verdict.get("red_flags") or []) if str(f).strip()]
 
-    if ml == "core":
-        rec, reason = "PASS", "ML/AI building is the core of this job"
+    if ml == "core" and kind in ("tabular", "forecasting"):
+        score = min(score, 8)   # still learning ML: never rate these as a 9-10 sure thing
+        verdict["fit_score"] = score
+
+    if kind == "advanced" and ml == "core":
+        rec, reason = "PASS", "deep learning / LLM / production ML is outside what Jarvis can build and check"
     elif score >= 7:
         if red_flags:
             rec, reason = "MAYBE", "strong fit, but check the red flags"
@@ -174,6 +200,11 @@ def enforce_ml_rule(verdict: dict) -> dict:
         rec, reason = "MAYBE", "partial fit"
     else:
         rec, reason = "PASS", "weak fit"
+
+    if ml == "core" and kind != "advanced":
+        reason += f"; {kind} ML job: Jarvis tests the model on hidden data, you explain it to the client"
+    elif ml == "minor" and kind == "advanced":
+        reason += "; skip the advanced-ML add-on or offer it as out of scope"
 
     verdict["recommendation"] = rec
     verdict["reason"] = reason
@@ -186,7 +217,8 @@ def show(verdict: dict) -> None:
     print("=" * 60)
     print(f"Deliverable:    {verdict.get('core_deliverable', '')}")
     print(f"Fit score:      {verdict.get('fit_score', '?')}/10")
-    print(f"ML involved:    {verdict.get('involves_ml', '?')}")
+    kind = verdict.get("ml_kind", "none")
+    print(f"ML involved:    {verdict.get('involves_ml', '?')}" + (f" ({kind})" if kind != "none" else ""))
     print(f"Recommendation: {verdict.get('recommendation', '?')} ({verdict.get('reason', '')})")
     for label, key in [("Pros", "pros"), ("Cons", "cons"),
                        ("Gaps", "gaps"), ("Red flags", "red_flags")]:
@@ -227,7 +259,11 @@ def save_job(listing: str, verdict: dict) -> str:
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "brief.txt"), "w", encoding="utf-8") as f:
         f.write(f"Gig: {title}\n")
-        f.write(f"Core deliverable: {verdict.get('core_deliverable', '')}\n\n")
+        f.write(f"Core deliverable: {verdict.get('core_deliverable', '')}\n")
+        if verdict.get("involves_ml") in ("core", "minor"):
+            # Tells the orchestrator to set up a hidden test set for the model.
+            f.write(f"ML job: {verdict['involves_ml']} ({verdict.get('ml_kind', 'tabular')})\n")
+        f.write("\n")
         f.write("Original listing:\n")
         f.write(listing)
     return folder

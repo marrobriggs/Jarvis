@@ -7,6 +7,7 @@ Flow for each round:
 
 Usage:
   python orchestrator.py sample_brief.txt --data sample_sales.csv               # fake brain
+  ... --ml / --no-ml    force the machine learning hidden test on or off (default: automatic)
   python orchestrator.py jobs/my-job/brief.txt --data jobs/my-job --brain claude
       (--data can be one file, a folder of files, or a zip, which gets unzipped)
   python orchestrator.py sample_brief.txt --data sample_sales.csv --brain ollama
@@ -22,7 +23,10 @@ import os
 import shutil
 from datetime import datetime
 
-from agents import run_analyst, run_qa, splice_findings
+import re
+
+import ml_check
+from agents import plan_ml, run_analyst, run_qa, splice_findings
 from brains import get_brain
 from data_preview import preview_many, stage_data
 from executor import (APPROVED_PACKAGES, describe_run, extract_code, install_package,
@@ -34,7 +38,8 @@ CODE_TIMEOUT = 600   # seconds a script may run; big Excel files need several mi
 
 # Packages the analyst may use, if they're installed on this computer.
 CHECK_PACKAGES = ["pandas", "numpy", "plotly", "streamlit", "pptx", "openpyxl", "matplotlib", "scipy",
-                  "statsmodels", "seaborn", "pyarrow", "kaleido", "python_calamine", "xlsxwriter"]
+                  "statsmodels", "seaborn", "pyarrow", "kaleido", "python_calamine", "xlsxwriter",
+                  "sklearn", "joblib", "xgboost", "lightgbm"]
 
 
 def environment_info() -> str:
@@ -43,7 +48,7 @@ def environment_info() -> str:
     import platform
     import sys
 
-    names = {"pptx": "python-pptx (import pptx)"}
+    names = {"pptx": "python-pptx (import pptx)", "sklearn": "scikit-learn (import sklearn)"}
     available = [names.get(p, p) for p in CHECK_PACKAGES if importlib.util.find_spec(p)]
     missing = [names.get(p, p) for p in CHECK_PACKAGES if names.get(p, p) not in available]
     return (f"Operating system: {platform.system()} {platform.release()}\n"
@@ -138,7 +143,43 @@ def save(folder: str, name: str, content: str) -> None:
         f.write(content)
 
 
-def build(brain, brain_name, brief, data_file, work, workdir, folder, label, decisions):
+def hidden_test(run, workdir, holdout):
+    """ML jobs: score the analyst's model on the rows it never saw, and add the result to the run."""
+    result = ml_check.score_model(workdir, holdout)
+    run["ml"] = result
+    text = ml_check.report(result, holdout, run["stdout"])
+    run["stdout"] = (run["stdout"] + "\n\n" + text).strip()
+    if result["ok"]:
+        main = result["main_metric"]
+        print(f"           Hidden test: {main} {ml_check._fmt(main, result['scores'][main])} vs baseline "
+              f"{ml_check._fmt(main, holdout['baseline'][main])} "
+              f"({'beats' if result['beats_baseline'] else 'does NOT beat'} it)")
+    else:
+        run["ok"] = False
+        run["stderr"] = (run["stderr"] + "\n\n" + result["error"]).strip()
+    return run
+
+
+def enforce_ml(review, run):
+    """Rules in code, not the model: a model that fails Jarvis's hidden test is never approved."""
+    result = (run or {}).get("ml")
+    if not result:
+        return review
+    if not result.get("ok"):
+        point = "BLOCKING (Jarvis hidden test): model.py could not be scored on the hidden rows."
+    elif not result["beats_baseline"]:
+        point = ("BLOCKING (Jarvis hidden test): the model does not clearly beat the simple baseline "
+                 "on rows it never saw. Improve the features or the model. If the data truly can't "
+                 "predict this, say so plainly in the findings; Jarvis will hand it to Marro to decide.")
+    else:
+        return review
+    review["feedback"] = [point] + [f for f in review["feedback"] if f != point]
+    review["verdict"] = "REVISE"
+    review["blocking"] = review.get("blocking", 0) + 1
+    return review
+
+
+def build(brain, brain_name, brief, data_file, work, workdir, folder, label, decisions, holdout=None):
     """Run the analyst's code, let it fix its own errors, then write findings from real output.
 
     Returns (work, run). Used by every review round and by the polish round.
@@ -147,6 +188,8 @@ def build(brain, brain_name, brief, data_file, work, workdir, folder, label, dec
     for attempt in range(1, MAX_FIX_TRIES + 1):
         package_note = handle_requirements(work, decisions)
         run = run_job(work, workdir, timeout=CODE_TIMEOUT)
+        if run["ok"] and holdout:
+            run = hidden_test(run, workdir, holdout)
         if package_note and not run["ok"]:
             run["stderr"] = ("PACKAGES NOT AVAILABLE:\n" + package_note + "\n\n" + run["stderr"]).strip()
         tag = f"{label}{chr(96 + attempt)}"  # 01a, 01b, Pa, Pb...
@@ -178,7 +221,8 @@ def build(brain, brain_name, brief, data_file, work, workdir, folder, label, dec
     return work, run
 
 
-def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir, folder, decisions):
+def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir, folder, decisions,
+                 holdout=None):
     """After approval, let the analyst apply QA's suggestions. Keep the result only if it's better.
 
     The approved work is snapshotted first, so a polish that breaks something or
@@ -203,12 +247,13 @@ def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir
     suggestions = [f for f in review["feedback"] if not f.strip().upper().startswith("BLOCKING")]
     polished = run_analyst(brain, brief, data_file, previous_work=work,
                            qa_feedback=suggestions, polish=True)
-    polished, prun = build(brain, brain_name, brief, data_file, polished, workdir, folder, "P", decisions)
+    polished, prun = build(brain, brain_name, brief, data_file, polished, workdir, folder, "P", decisions,
+                           holdout)
     if not prun["ok"]:
         return restore("The polished code didn't run.")
 
     print("[Polish] QA manager is checking the polished version...")
-    new_review = run_qa(brain, brief, polished, describe_run(prun), previous_review=review)
+    new_review = enforce_ml(run_qa(brain, brief, polished, describe_run(prun), previous_review=review), prun)
     save(folder, "P_qa_review.json", json.dumps(new_review, indent=2))
     print(f"           Score {new_review['score']}/10 -> {new_review['verdict']} "
           f"(was {review['score']}/10)")
@@ -219,6 +264,49 @@ def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir
     for point in new_review["feedback"]:
         print(f"           - {point}")
     return polished, prun, new_review, True
+
+
+_ML_LINE = re.compile(r"^\s*ML (?:job|involved)\s*:\s*(core|minor)", re.IGNORECASE | re.MULTILINE)
+_ML_WORDS = re.compile(r"\b(predict\w*|forecast\w*|machine learning|classif\w+|regression model|"
+                       r"churn model|propensity|scoring model|ML model)\b", re.IGNORECASE)
+
+
+def ml_wanted(brief: str, ml=None) -> bool:
+    """Should Jarvis check for an ML job? --ml / --no-ml win; else the grader's note or the brief's words."""
+    if ml is not None:
+        return ml
+    return bool(_ML_LINE.search(brief) or _ML_WORDS.search(brief))
+
+
+def setup_hidden_test(brain, brief, profile, workdir, files, folder):
+    """Decide what to predict, then hide test rows from the analyst. Returns (holdout, files)."""
+    print("Jarvis: this looks like it may need a model. Setting up a hidden test set...")
+    try:
+        raw_plan = plan_ml(brain, brief + "\n\nDATA PREVIEW:\n" + profile)
+        plan, problem = ml_check.validate_plan(raw_plan, workdir, files)
+        if not plan:
+            print(f"Jarvis: no hidden test set ({problem}).")
+            save(folder, "00_ml_plan.json", json.dumps({"plan": raw_plan, "skipped": problem}, indent=2))
+            return None, files
+        holdout = ml_check.hold_out(workdir, plan)
+        if "skipped" in holdout:
+            print(f"Jarvis: no hidden test set ({holdout['skipped']}).")
+            save(folder, "00_ml_plan.json", json.dumps({"plan": plan, "skipped": holdout["skipped"]}, indent=2))
+            return None, files
+    except Exception as e:   # never let the ML setup kill a job
+        print(f"Jarvis: couldn't set up a hidden test set ({type(e).__name__}: {e}).")
+        return None, files
+    new_name = holdout["plan"]["file"]
+    files = [new_name if f == holdout["original_file"] else f for f in files]
+    base = holdout["baseline"]
+    main = ml_check.MAIN_METRIC[plan["task"]]
+    save(folder, "00_ml_plan.json", json.dumps({
+        "plan": holdout["plan"], "train_rows": holdout["train_rows"], "hidden_rows": holdout["test_rows"],
+        "split": holdout["split_note"], "baseline": base}, indent=2, default=str))
+    print(f"Jarvis: {plan['task']} on '{plan['target']}'. Hid {holdout['test_rows']} of "
+          f"{holdout['test_rows'] + holdout['train_rows']} rows ({holdout['split_note']}). "
+          f"Baseline {main}: {ml_check._fmt(main, base[main])}.")
+    return holdout, files
 
 
 def learn(memory, brief, work, reviews, status, rounds, brain, brain_name):
@@ -235,7 +323,8 @@ def learn(memory, brief, work, reviews, status, rounds, brain, brain_name):
 
 
 def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
-                 brief_path: str = "", polish: bool = True, use_memory: bool = True) -> dict:
+                 brief_path: str = "", polish: bool = True, use_memory: bool = True,
+                 ml=None) -> dict:
     brain = get_brain(brain_name)
     folder = os.path.join("runs", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     workdir = os.path.join(folder, "work")
@@ -243,6 +332,7 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
     save(folder, "00_brief.txt", brief)
 
     data_file = ""
+    holdout, ml_section = None, ""
     if data_path:
         if not os.path.exists(data_path):
             raise SystemExit(f"Jarvis: can't find the data at {data_path}")
@@ -250,12 +340,22 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
         files = stage_data(data_path, workdir, exclude=[brief_path])
         if not files:
             raise SystemExit(f"Jarvis: no data files found in {data_path}")
-        data_file = ", ".join(files)
-        print(f"Jarvis: staged {len(files)} data file(s): {data_file}")
+        print(f"Jarvis: staged {len(files)} data file(s): {', '.join(files)}")
         # Show the agents what's really in the data, so nobody guesses column names.
         profile = preview_many(workdir, files)
+
+        # ML jobs: hide test rows BEFORE the analyst sees anything (the preview is rebuilt after).
+        if ml_wanted(brief, ml):
+            holdout, files = setup_hidden_test(brain, brief, profile, workdir, files, folder)
+            if holdout:
+                profile = preview_many(workdir, files)
+                ml_section = ml_check.brief_section(holdout)
+
+        data_file = ", ".join(files)
         save(folder, "00_data_preview.txt", profile)
         brief = brief + "\n\nDATA PREVIEW (generated automatically by Jarvis):\n" + profile
+        if ml_section:
+            brief = brief + "\n\n" + ml_section
         print("Jarvis: data preview built and shared with the agents.")
 
     install_theme(workdir)
@@ -293,10 +393,10 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
                            qa_feedback=review["feedback"] if review else None)
 
         work, run = build(brain, brain_name, brief, data_file, work, workdir, folder,
-                          f"{round_num:02d}", package_decisions)
+                          f"{round_num:02d}", package_decisions, holdout)
 
         print(f"[Round {round_num}] QA manager is reviewing the work and its output...")
-        review = run_qa(brain, brief, work, describe_run(run), previous_review=review)
+        review = enforce_ml(run_qa(brain, brief, work, describe_run(run), previous_review=review), run)
         reviews.append(review)
         if not run["ok"]:
             review["verdict"] = "REVISE"  # code that doesn't run never gets approved
@@ -314,13 +414,21 @@ def run_pipeline(brief: str, brain_name: str = "mock", data_path: str = "",
                 approved_review = review
                 work, run, review, polished = polish_round(
                     brain, brain_name, brief, data_file, work, run, review,
-                    workdir, folder, package_decisions)
+                    workdir, folder, package_decisions, holdout)
                 if review is not approved_review:
                     reviews.append(review)
                 print()
             save(folder, "FINAL_deliverable.md", work)
             note = " (polished)" if polished else ""
             print(f"Jarvis: approved in round {round_num}{note}. Final deliverable is in {folder}")
+            if holdout and (run or {}).get("ml", {}).get("ok"):
+                result = run["ml"]
+                main = result["main_metric"]
+                print(f"\nHidden test ({holdout['test_rows']} rows the analyst never saw): {main} "
+                      f"{ml_check._fmt(main, result['scores'][main])} vs baseline "
+                      f"{ml_check._fmt(main, holdout['baseline'][main])}.")
+                for w in result["warnings"]:
+                    print(f"  Warning: {w}")
             if os.path.exists(os.path.join(workdir, "app.py")):
                 write_launcher(workdir)
                 print("\nTo open the report app, double-click OPEN_REPORT.bat in the work folder, or run:")
@@ -368,8 +476,12 @@ if __name__ == "__main__":
                         help="skip the polish round after approval (faster, cheaper)")
     parser.add_argument("--no-memory", action="store_true",
                         help="don't recall or save memories for this run")
+    parser.add_argument("--ml", dest="ml", action="store_true", default=None,
+                        help="this job needs a model: always set up a hidden test set")
+    parser.add_argument("--no-ml", dest="ml", action="store_false",
+                        help="never set up a hidden test set")
     args = parser.parse_args()
 
     with open(args.brief_file, encoding="utf-8") as f:
         run_pipeline(f.read(), args.brain, args.data, brief_path=args.brief_file,
-                     polish=not args.no_polish, use_memory=not args.no_memory)
+                     polish=not args.no_polish, use_memory=not args.no_memory, ml=args.ml)

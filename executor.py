@@ -297,6 +297,8 @@ APPROVED_PACKAGES = {
     "pandas", "numpy", "plotly", "kaleido", "matplotlib", "seaborn", "scipy",
     "statsmodels", "openpyxl", "xlsxwriter", "xlrd", "pyarrow", "python-calamine",
     "tabulate", "fpdf2", "reportlab", "python-docx", "jinja2", "streamlit", "python-pptx",
+    # machine learning (classic, tabular): widely used and well maintained
+    "scikit-learn", "joblib", "xgboost", "lightgbm",
 }
 
 _VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$")
