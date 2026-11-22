@@ -193,20 +193,12 @@ def final_refit(brain, brain_name, brief, data_file, work, run, review, workdir,
     from the client's model and scores would only make the delivery worse. If anything goes
     wrong, the approved version is kept.
     """
-    snapshot = workdir + "_approved"
-    if os.path.exists(snapshot):
-        shutil.rmtree(snapshot)
-    shutil.copytree(workdir, snapshot)
+    snapshot = take_snapshot(workdir, "before_final")
 
     def keep_approved(reason):
         print(f"[Final] {reason} Keeping the approved version "
               f"(trained on {holdout['train_rows']} of {holdout['full_rows']} rows).")
-        try:
-            shutil.rmtree(workdir)
-            shutil.copytree(snapshot, workdir)
-            shutil.rmtree(snapshot)
-        except OSError as e:
-            print(f"           Couldn't restore automatically ({e}). The approved version is in {snapshot}")
+        restore_snapshot(snapshot, workdir)
         return work, run, review
 
     print(f"[Final] Final step: retraining on all {holdout['full_rows']} rows and scoring everything...")
@@ -237,7 +229,7 @@ def final_refit(brain, brain_name, brief, data_file, work, run, review, workdir,
                     print(f"           - {point}")
             return keep_approved("QA didn't approve the final version.")
         review = new_review
-    shutil.rmtree(snapshot, ignore_errors=True)
+    _remove_tree(snapshot)   # leftover copies are harmless if a lock keeps one around
     print(f"[Final] Done: model retrained on all {holdout['full_rows']} rows, every row scored.")
     return new_work, final, review
 
@@ -284,6 +276,57 @@ def build(brain, brain_name, brief, data_file, work, workdir, folder, label, dec
     return work, run
 
 
+def _remove_tree(path: str) -> bool:
+    """Delete a folder, tolerating Windows/OneDrive locks. Returns True if it's gone.
+
+    OneDrive (and antivirus) briefly lock files they're syncing or scanning, and Windows
+    then refuses the delete. Clear read-only flags and retry for a few seconds.
+    """
+    import stat
+    import time
+
+    def unlock(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    for _ in range(10):
+        if not os.path.exists(path):
+            return True
+        try:
+            shutil.rmtree(path, onerror=unlock)
+        except OSError:
+            pass
+        if not os.path.exists(path):
+            return True
+        time.sleep(0.5)
+    return not os.path.exists(path)
+
+
+def take_snapshot(workdir: str, tag: str) -> str:
+    """Copy the work folder aside before a risky step. Always a fresh folder name."""
+    snapshot = f"{workdir}_{tag}_{datetime.now():%H%M%S}"
+    shutil.copytree(workdir, snapshot)
+    return snapshot
+
+
+def restore_snapshot(snapshot: str, workdir: str) -> bool:
+    """Put the snapshot back as the work folder. Returns True if it worked."""
+    try:
+        if not _remove_tree(workdir):
+            # Couldn't clear it (files locked): copy the approved files back on top instead.
+            shutil.copytree(snapshot, workdir, dirs_exist_ok=True)
+        else:
+            shutil.copytree(snapshot, workdir)
+    except OSError as e:
+        print(f"           Couldn't restore automatically ({e}). The approved version is in {snapshot}")
+        return False
+    _remove_tree(snapshot)
+    return True
+
+
 def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir, folder, decisions,
                  holdout=None):
     """After approval, let the analyst apply QA's suggestions. Keep the result only if it's better.
@@ -291,19 +334,11 @@ def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir
     The approved work is snapshotted first, so a polish that breaks something or
     scores lower is thrown away and the approved version is restored.
     """
-    snapshot = workdir + "_approved"
-    if os.path.exists(snapshot):
-        shutil.rmtree(snapshot)
-    shutil.copytree(workdir, snapshot)
+    snapshot = take_snapshot(workdir, "approved")
 
     def restore(reason):
         print(f"           {reason} Keeping the approved version.")
-        try:
-            shutil.rmtree(workdir)
-            shutil.copytree(snapshot, workdir)
-            shutil.rmtree(snapshot)
-        except OSError as e:
-            print(f"           Couldn't restore automatically ({e}). The approved version is in {snapshot}")
+        restore_snapshot(snapshot, workdir)
         return work, run, review, False
 
     print("[Polish] Analyst is applying QA's suggestions...")
@@ -323,7 +358,7 @@ def polish_round(brain, brain_name, brief, data_file, work, run, review, workdir
     if new_review["verdict"] != "APPROVE" or new_review["score"] < review["score"]:
         return restore("The polish didn't improve the score.")
 
-    shutil.rmtree(snapshot, ignore_errors=True)
+    _remove_tree(snapshot)   # leftover copies are harmless if a lock keeps one around
     for point in new_review["feedback"]:
         print(f"           - {point}")
     return polished, prun, new_review, True
