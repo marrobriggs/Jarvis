@@ -253,6 +253,8 @@ Label EVERY feedback point as BLOCKING or POLISH:
   extra context, footnotes, nicer formatting. Polish points go to a later polish round.
 - Client-facing text in the "we" voice, or requests to the client inside a report,
   deck or file, are POLISH points (questions belong under "Questions for the client").
+  The first person "I" is CORRECT (Marro is a solo freelancer): never ask to remove
+  "I" or to rewrite it in a neutral or impersonal voice.
 - Extras the client called optional ("nice to have", "a plus", "bonus") are NOT
   required. Never mark a missing optional extra as BLOCKING; it should be offered
   under "Optional next steps" (if it isn't, that's a POLISH point).
